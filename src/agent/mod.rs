@@ -207,34 +207,24 @@ impl Agent {
     /// Complexity score threshold above which auto-planning triggers.
     pub const PLAN_THRESHOLD: u8 = 3;
 
-    /// Returns true if the input looks conversational (greeting, question,
-    /// explanation request) — i.e. no tools should be offered to the LLM.
-    ///
-    /// This is enforced at the protocol level: when true, tools are stripped
-    /// from the ChatRequest so the LLM physically cannot call them.
-    pub fn is_conversational(input: &str) -> bool {
+    /// Fast rule-based intent pre-check.
+    /// Returns `Some(true)` = definitely conversational,
+    ///         `Some(false)` = definitely task,
+    ///         `None` = uncertain, needs LLM fallback.
+    pub fn intent_rules(input: &str) -> Option<bool> {
         let trimmed = input.trim();
         let lower = trimmed.to_lowercase();
         let word_count = trimmed.split_whitespace().count();
 
-        // ── Fast path: very short input is always conversational ──────────────
-        if word_count <= 3 {
-            // Unless it looks like a short command (contains /, ., --, or a known
-            // action verb that makes sense as a standalone short command).
-            let short_task_signals = [
-                "run ", "fix ", "add ", "buat ", "test ", "build ",
-                "install ", "deploy ", "delete ", "remove ",
-            ];
-            let has_short_task = short_task_signals.iter().any(|s| lower.starts_with(s));
-            let has_path = trimmed.contains('/') || trimmed.contains('.')
-                || trimmed.contains("--");
-            if !has_short_task && !has_path {
-                return true;
-            }
-        }
+        // ── Definite task signals ─────────────────────────────────────────────
+        let has_shell_signal = lower.contains("cargo ")
+            || lower.contains("git ")
+            || lower.contains("npm ")
+            || lower.contains("pip ")
+            || lower.contains(" --")
+            || lower.starts_with("$ ");
+        if has_shell_signal { return Some(false); }
 
-        // ── Technical signals → this is a task, NOT conversational ───────────
-        // File path patterns — only a task signal when combined with an action verb.
         let has_file_ref = trimmed.split_whitespace().any(|w| {
             let w = w.trim_matches(|c: char| ",;:?!".contains(c));
             let code_exts = [".rs", ".py", ".js", ".ts", ".go", ".toml", ".md",
@@ -243,16 +233,6 @@ impl Agent {
                 || (w.contains('/') && !w.starts_with("http"))
         });
 
-        // Shell / CLI patterns — these are always tasks.
-        let has_shell_signal = lower.contains("cargo ")
-            || lower.contains("git ")
-            || lower.contains("npm ")
-            || lower.contains("pip ")
-            || lower.contains(" --")
-            || lower.starts_with("$ ");
-        if has_shell_signal { return false; }
-
-        // Action verbs that unambiguously indicate a coding task.
         let task_verbs = [
             "implement", "refactor", "migrate", "redesign", "rewrite",
             "create ", "add ", "fix ", "build ", "write ", "update ",
@@ -262,40 +242,91 @@ impl Agent {
         ];
         let has_task_verb = task_verbs.iter().any(|v| lower.contains(v));
 
-        // File ref only blocks conversational when paired with a task verb.
-        if has_file_ref && has_task_verb { return false; }
-        if has_task_verb && word_count > 4 { return false; }
+        if has_file_ref && has_task_verb { return Some(false); }
+        if has_task_verb && word_count > 4 { return Some(false); }
 
-        // ── Positive conversational signals ───────────────────────────────────
-        // Question starters without action verbs
+        // ── Definite conversational signals ───────────────────────────────────
+        if word_count <= 3 {
+            let short_task_signals = [
+                "run ", "fix ", "add ", "buat ", "test ", "build ",
+                "install ", "deploy ", "delete ", "remove ",
+            ];
+            let has_short_task = short_task_signals.iter().any(|s| lower.starts_with(s));
+            let has_path = trimmed.contains('/') || trimmed.contains('.')
+                || trimmed.contains("--");
+            if !has_short_task && !has_path {
+                return Some(true);
+            }
+        }
+
         let question_starters = [
             "what ", "how ", "why ", "when ", "where ", "who ", "which ",
             "can you ", "could you ", "do you ", "did you ", "is it ", "are you ",
             "apa ", "bagaimana ", "kenapa ", "mengapa ", "kapan ", "siapa ",
-            "boleh ", "bisa ", "apakah ", "tolong jelaskan", "jelaskan ",
+            "boleh ", "bisa ", "apakah ", "tolong jelaskan", "jelaskan ", "explain ", "describe ", "tell me ",
         ];
-        let has_question = question_starters.iter().any(|q| lower.starts_with(q));
-
-        // Instruction/preference phrases that aren't coding tasks
         let pref_phrases = [
-            "pake ", "pakai ", "gunakan ", "use ", "speak ", "talk ",
+            "pake ", "pakai ", "gunakan ", "speak ", "talk ",
             "bahasa ", "language ", "in english", "in indonesian",
             "please ", "mohon ", "tolong ",
         ];
+        let has_question = question_starters.iter().any(|q| lower.starts_with(q));
         let has_pref = pref_phrases.iter().any(|p| lower.starts_with(p) || lower.contains(p));
 
-        if has_question || has_pref {
-            return true;
+        if (has_question || has_pref) && !has_task_verb {
+            // If there's a file ref in a question, let LLM decide (could be
+            // "what does session.rs do?" vs "fix session.rs please").
+            if has_file_ref {
+                return None;
+            }
+            return Some(true);
         }
 
-        // ── Default: longer inputs without clear task signals are borderline ──
-        // Be conservative: if we reach here and the input is not too long,
-        // treat it as conversational rather than risk running unwanted tools.
-        if word_count <= 8 {
-            return true;
+        // ── Uncertain ─────────────────────────────────────────────────────────
+        None
+    }
+
+    /// Classify whether user input is conversational or a task.
+    /// Uses fast rule-based check first; falls back to a lightweight LLM call
+    /// returning `{"intent":"conversational"}` or `{"intent":"task"}`.
+    /// On any error, defaults to task mode (safe: tools available but not forced).
+    pub async fn classify_intent(&self, input: &str) -> bool {
+        // Fast path
+        if let Some(result) = Self::intent_rules(input) {
+            return result;
         }
 
-        false
+        // LLM fallback — single message, no tools, max 20 tokens
+        let prompt = format!(
+            "Classify this user message.\nRespond ONLY with JSON:              {{\"intent\":\"conversational\"}} or {{\"intent\":\"task\"}}\n\n             conversational = greeting, small talk, preference setting, language request,              general question, acknowledgement.\n             task = coding task, file edit, shell command, implementation request.\n\n             Message: {input}"
+        );
+
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages: vec![Message::user(prompt)],
+            temperature: 0.0,
+            max_tokens: Some(20),
+            stream: false,
+            tools: vec![],
+            system: None,
+        };
+
+        match self.provider.chat(&req).await {
+            Ok(resp) => {
+                let text = resp.content.unwrap_or_default();
+                // Try strict JSON parse first
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+                    if let Some(intent) = val.get("intent").and_then(|v| v.as_str()) {
+                        return intent == "conversational";
+                    }
+                }
+                // Fallback: scan raw text
+                let lower = text.to_lowercase();
+                lower.contains("\"conversational\"")
+                    || (lower.contains("conversational") && !lower.contains("task"))
+            }
+            Err(_) => false, // Default to task on error
+        }
     }
 
     pub async fn plan(&self, task: &str) -> Result<String> {
@@ -423,7 +454,7 @@ impl Agent {
 
         // If the input is conversational, strip tools entirely so the LLM
         // cannot physically call shell_exec or write_file.
-        let conversational = Self::is_conversational(&user_input);
+        let conversational = self.classify_intent(&user_input).await;
 
         loop {
             let messages = self.snapshot().await;
@@ -1005,47 +1036,49 @@ mod tests {
 
     #[test]
     fn conversational_greetings() {
-        assert!(Agent::is_conversational("halo"));
-        assert!(Agent::is_conversational("hi"));
-        assert!(Agent::is_conversational("hello"));
-        assert!(Agent::is_conversational("hai"));
-        assert!(Agent::is_conversational("hali"));
-        assert!(Agent::is_conversational("thanks"));
-        assert!(Agent::is_conversational("terima kasih"));
-        assert!(Agent::is_conversational("ok"));
-        assert!(Agent::is_conversational("mantap"));
+        assert_eq!(Agent::intent_rules("halo"), Some(true));
+        assert_eq!(Agent::intent_rules("hi"), Some(true));
+        assert_eq!(Agent::intent_rules("hello"), Some(true));
+        assert_eq!(Agent::intent_rules("hai"), Some(true));
+        assert_eq!(Agent::intent_rules("hali"), Some(true));
+        assert_eq!(Agent::intent_rules("thanks"), Some(true));
+        assert_eq!(Agent::intent_rules("terima kasih"), Some(true));
+        assert_eq!(Agent::intent_rules("ok"), Some(true));
+        assert_eq!(Agent::intent_rules("mantap"), Some(true));
     }
 
     #[test]
     fn conversational_short_inputs() {
-        assert!(Agent::is_conversational("ok sip"));
-        assert!(Agent::is_conversational("noted"));
-        assert!(Agent::is_conversational("pake bahasa indonesia"));
-        assert!(Agent::is_conversational("use english please"));
-        assert!(Agent::is_conversational("speak indonesian"));
-        assert!(Agent::is_conversational("bahasa indonesia ya"));
+        assert_eq!(Agent::intent_rules("ok sip"), Some(true));
+        assert_eq!(Agent::intent_rules("noted"), Some(true));
+        assert_eq!(Agent::intent_rules("pake bahasa indonesia"), Some(true));
+        assert_eq!(Agent::intent_rules("use english please"), Some(true));
+        assert_eq!(Agent::intent_rules("speak indonesian"), Some(true));
+        assert_eq!(Agent::intent_rules("bahasa indonesia ya"), Some(true));
     }
 
     #[test]
     fn conversational_questions_no_action() {
-        assert!(Agent::is_conversational("what does session.rs do?"));
-        assert!(Agent::is_conversational("how does the agent loop work?"));
-        assert!(Agent::is_conversational("explain the tool dispatch"));
-        assert!(Agent::is_conversational("what is a steering file?"));
+        // Questions without file refs → rule detects as conversational
+        assert_eq!(Agent::intent_rules("how does the agent loop work?"), Some(true));
+        assert_eq!(Agent::intent_rules("explain the tool dispatch"), Some(true));
+        assert_eq!(Agent::intent_rules("what is a steering file?"), Some(true));
+        // Question WITH file ref but no task verb → uncertain, falls back to LLM
+        assert_eq!(Agent::intent_rules("what does session.rs do?"), None);
     }
 
     #[test]
     fn not_conversational_tasks() {
-        assert!(!Agent::is_conversational("implement pagination for the API endpoint"));
-        assert!(!Agent::is_conversational("fix the bug in session.rs"));
-        assert!(!Agent::is_conversational("add unit tests to agent/mod.rs"));
-        assert!(!Agent::is_conversational("refactor the auth module to use new tokens"));
-        assert!(!Agent::is_conversational("run cargo test and fix all failures"));
-        assert!(!Agent::is_conversational("buat fungsi baru di tools/mod.rs"));
+        assert_ne!(Agent::intent_rules("implement pagination for the API endpoint"), Some(true));
+        assert_ne!(Agent::intent_rules("fix the bug in session.rs"), Some(true));
+        assert_ne!(Agent::intent_rules("add unit tests to agent/mod.rs"), Some(true));
+        assert_ne!(Agent::intent_rules("refactor the auth module to use new tokens"), Some(true));
+        assert_ne!(Agent::intent_rules("run cargo test and fix all failures"), Some(true));
+        assert_ne!(Agent::intent_rules("buat fungsi baru di tools/mod.rs"), Some(true));
     }
 
     #[test]
     fn not_conversational_question_with_action() {
-        assert!(!Agent::is_conversational("how do I implement oauth login in session.rs?"));
+        assert_ne!(Agent::intent_rules("how do I implement oauth login in session.rs?"), Some(true));
     }
 }
