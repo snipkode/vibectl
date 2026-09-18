@@ -300,6 +300,7 @@ impl Agent {
         let is_first_turn = self.messages.lock().unwrap().is_empty();
         if self.auto_plan
             && is_first_turn
+            && user_input.split_whitespace().count() >= 4
             && Self::complexity_score(&user_input) >= Self::PLAN_THRESHOLD
         {
             match self.plan(&user_input).await {
