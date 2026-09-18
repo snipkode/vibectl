@@ -159,7 +159,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     // ── LEFT: logo pill ───────────────────────────────────────────────────────
-    //  " ◈ vibectl "
+    //  "  ◈ vibectl  │  "
     let logo_spans = vec![
         Span::raw("  "),
         Span::styled(
@@ -175,7 +175,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
+        Span::styled("  │  ", Style::default().fg(C_HDR_SEP)),
     ];
     let logo_w: u16 = logo_spans.iter().map(|s| s.content.chars().count() as u16).sum();
 
@@ -193,16 +193,13 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let provider = &app.session.provider_label;
     let model    = &app.session.agent.model;
     let cwd_full = app.session.cwd.display().to_string();
-    // shorten cwd: only last 2 path components
-    let cwd_short = short_cwd(&cwd_full, center_w as usize);
-
-    let sep = Span::styled("  │  ", Style::default().fg(C_HDR_SEP));
+    let cwd_short = short_cwd(&cwd_full, (center_w as usize).saturating_sub(20));
 
     let center_content = vec![
         Span::styled(provider.clone(), Style::default().fg(C_HDR_VAL)),
         Span::styled("  ·  ", Style::default().fg(C_HDR_SEP)),
         Span::styled(model.clone(), Style::default().fg(C_HDR_VAL)),
-        sep.clone(),
+        Span::styled("  │  ", Style::default().fg(C_HDR_SEP)),
         Span::styled(cwd_short, Style::default().fg(C_HDR_META)),
     ];
     let content_w: u16 = center_content.iter().map(|s| s.content.chars().count() as u16).sum();
@@ -253,32 +250,30 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn build_right_pill(app: &App) -> (Vec<Span<'static>>, u16) {
-    let spans: Vec<Span> = if app.busy {
+    // always starts with a │ divider
+    let mut spans: Vec<Span> = vec![
+        Span::styled("  │  ", Style::default().fg(Color::Rgb(38, 44, 66))),
+    ];
+
+    if app.busy {
         let sp = spinner_char(app);
         let label = if let Some(tool) = &app.running_tool {
-            format!(" {sp}  {} ", tool)
+            format!("{sp}  {}", tool)
         } else {
-            format!(" {sp}  thinking… ")
+            format!("{sp}  thinking…")
         };
-        let _w = label.chars().count() as u16 + 2;
-        vec![
-            Span::raw("  "),
-            Span::styled(label, Style::default().fg(C_TOOL_MARK)),
-        ]
+        spans.push(Span::styled(label, Style::default().fg(C_TOOL_MARK)));
     } else {
-        let mut parts: Vec<Span> = vec![Span::raw("  ")];
         if app.scroll_offset > 0 {
-            parts.push(Span::styled(
+            spans.push(Span::styled(
                 format!("↑{}  ", app.scroll_offset),
                 Style::default().fg(C_AGENT_MARK),
             ));
         }
-        parts.push(Span::styled(
-            "?  help  ",
-            Style::default().fg(C_HINT),
-        ));
-        parts
-    };
+        spans.push(Span::styled("?  help", Style::default().fg(C_HINT)));
+    }
+    spans.push(Span::raw("  "));
+
     let total_w: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
     (spans, total_w)
 }
