@@ -70,8 +70,8 @@ pub fn create(run_id: u64, project_root: &Path) -> Result<String> {
     }
 
     // Find the stash ref we just created.
-    let stash_ref = find_latest_vibectl_stash(project_root)?
-        .unwrap_or_else(|| "stash@{0}".to_string());
+    let stash_ref =
+        find_latest_vibectl_stash(project_root)?.unwrap_or_else(|| "stash@{0}".to_string());
 
     Ok(stash_ref)
 }

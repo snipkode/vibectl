@@ -128,17 +128,17 @@ pub struct AtEntry {
 
 /// All slash commands with their description and usage hint.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
-    ("/help",     "Toggle help panel",               "/help"),
-    ("/clear",    "Clear message view",               "/clear"),
-    ("/new",      "Reset conversation history",       "/new"),
-    ("/model",    "Switch model",                     "/model <name>"),
-    ("/plan",     "Generate implementation plan",     "/plan <task>"),
-    ("/spec",     "Show current plan",                "/spec"),
-    ("/undo",     "Rollback last agent changes",      "/undo"),
-    ("/steer",    "Append rule to steer.md",          "/steer <rule>"),
-    ("/cfg",      "Print effective config",           "/cfg"),
-    ("/provider", "Show provider + model info",       "/provider"),
-    ("/quit",     "Exit vibectl",                     "/quit"),
+    ("/help", "Toggle help panel", "/help"),
+    ("/clear", "Clear message view", "/clear"),
+    ("/new", "Reset conversation history", "/new"),
+    ("/model", "Switch model", "/model <name>"),
+    ("/plan", "Generate implementation plan", "/plan <task>"),
+    ("/spec", "Show current plan", "/spec"),
+    ("/undo", "Rollback last agent changes", "/undo"),
+    ("/steer", "Append rule to steer.md", "/steer <rule>"),
+    ("/cfg", "Print effective config", "/cfg"),
+    ("/provider", "Show provider + model info", "/provider"),
+    ("/quit", "Exit vibectl", "/quit"),
 ];
 
 pub struct App {
@@ -185,8 +185,7 @@ impl App {
     pub fn new(session: Session) -> Self {
         let welcome = format!(
             "vibectl  {}  {}",
-            session.provider_label,
-            session.agent.model
+            session.provider_label, session.agent.model
         );
         Self {
             session,
@@ -244,7 +243,9 @@ impl App {
     }
 
     pub fn suggestion_prev(&mut self) {
-        if self.suggestions.is_empty() { return; }
+        if self.suggestions.is_empty() {
+            return;
+        }
         if self.suggestion_sel == 0 {
             self.suggestion_sel = self.suggestions.len() - 1;
         } else {
@@ -253,7 +254,9 @@ impl App {
     }
 
     pub fn suggestion_next(&mut self) {
-        if self.suggestions.is_empty() { return; }
+        if self.suggestions.is_empty() {
+            return;
+        }
         self.suggestion_sel = (self.suggestion_sel + 1) % self.suggestions.len();
     }
 
@@ -295,25 +298,38 @@ impl App {
     }
 
     pub fn at_prev(&mut self) {
-        if self.at_files.is_empty() { return; }
-        if self.at_sel == 0 { self.at_sel = self.at_files.len() - 1; }
-        else { self.at_sel -= 1; }
+        if self.at_files.is_empty() {
+            return;
+        }
+        if self.at_sel == 0 {
+            self.at_sel = self.at_files.len() - 1;
+        } else {
+            self.at_sel -= 1;
+        }
     }
 
     pub fn at_next(&mut self) {
-        if self.at_files.is_empty() { return; }
+        if self.at_files.is_empty() {
+            return;
+        }
         self.at_sel = (self.at_sel + 1) % self.at_files.len();
     }
 
     /// Complete the @ mention with selected file path.
     pub fn complete_at(&mut self) {
-        if !self.at_visible || self.at_files.is_empty() { return; }
+        if !self.at_visible || self.at_files.is_empty() {
+            return;
+        }
         let entry = self.at_files[self.at_sel].clone();
         // Find the @ position in input and replace query with label
         let at_pos = self.find_at_pos();
         if let Some(pos) = at_pos {
             let before: String = self.input.chars().take(pos).collect();
-            let after: String = self.input.chars().skip(pos + 1 + self.at_query.chars().count()).collect();
+            let after: String = self
+                .input
+                .chars()
+                .skip(pos + 1 + self.at_query.chars().count())
+                .collect();
             let trail = if entry.is_dir { "/" } else { " " };
             self.input = format!("{before}@{}{trail}{after}", entry.label);
             self.cursor = before.chars().count() + 1 + entry.label.chars().count() + 1;
@@ -341,8 +357,12 @@ impl App {
         // Search backward from cursor
         let end = self.cursor.min(chars.len());
         for i in (0..end).rev() {
-            if chars[i] == '@' { return Some(i); }
-            if chars[i] == ' ' || chars[i] == '\n' { break; }
+            if chars[i] == '@' {
+                return Some(i);
+            }
+            if chars[i] == ' ' || chars[i] == '\n' {
+                break;
+            }
         }
         None
     }
@@ -355,7 +375,8 @@ impl App {
         let mut result = prompt.to_string();
         result.push_str("\n\n---\nAttached file context:\n");
         for path in &self.at_tagged {
-            let label = path.strip_prefix(&self.session.cwd)
+            let label = path
+                .strip_prefix(&self.session.cwd)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| path.display().to_string());
             result.push_str(&format!("\n### {}\n", label));
@@ -363,7 +384,9 @@ impl App {
                 Ok(contents) => {
                     result.push_str("```\n");
                     result.push_str(&contents);
-                    if !contents.ends_with('\n') { result.push('\n'); }
+                    if !contents.ends_with('\n') {
+                        result.push('\n');
+                    }
                     result.push_str("```\n");
                 }
                 Err(e) => result.push_str(&format!("(error reading file: {e})\n")),
@@ -569,14 +592,18 @@ pub fn scan_at_files(cwd: &std::path::Path, query: &str) -> Vec<AtEntry> {
 
     let query_lower = query.to_lowercase();
     // Determine base dir and filename prefix
-    let (base_dir, name_prefix) = if query.contains('/') || query.contains(std::path::MAIN_SEPARATOR) {
-        let p = std::path::Path::new(query);
-        let parent = p.parent().unwrap_or(std::path::Path::new("."));
-        let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-        (cwd.join(parent), name.to_string())
-    } else {
-        (cwd.to_path_buf(), query_lower.clone())
-    };
+    let (base_dir, name_prefix) =
+        if query.contains('/') || query.contains(std::path::MAIN_SEPARATOR) {
+            let p = std::path::Path::new(query);
+            let parent = p.parent().unwrap_or(std::path::Path::new("."));
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            (cwd.join(parent), name.to_string())
+        } else {
+            (cwd.to_path_buf(), query_lower.clone())
+        };
 
     let Ok(entries) = fs::read_dir(&base_dir) else {
         return vec![];
@@ -588,22 +615,31 @@ pub fn scan_at_files(cwd: &std::path::Path, query: &str) -> Vec<AtEntry> {
             let path = e.path();
             let name = path.file_name()?.to_string_lossy().to_lowercase();
             // skip hidden and target/
-            if name.starts_with('.') { return None; }
-            if name == "target" { return None; }
-            if !name.starts_with(&name_prefix) { return None; }
+            if name.starts_with('.') {
+                return None;
+            }
+            if name == "target" {
+                return None;
+            }
+            if !name.starts_with(&name_prefix) {
+                return None;
+            }
             let is_dir = path.is_dir();
             // relative label from cwd
-            let label = path.strip_prefix(cwd)
+            let label = path
+                .strip_prefix(cwd)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| path.display().to_string());
-            Some(AtEntry { label, path, is_dir })
+            Some(AtEntry {
+                label,
+                path,
+                is_dir,
+            })
         })
         .collect();
 
     // Dirs first, then files, both sorted
-    results.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then(a.label.cmp(&b.label))
-    });
+    results.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.label.cmp(&b.label)));
     results.truncate(20);
     results
 }

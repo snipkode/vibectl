@@ -144,16 +144,29 @@ async fn run_loop(
 async fn handle_app_msg(app: &mut App, msg: AppMsg) {
     match msg {
         AppMsg::Text(id, t) => {
-            if id == app.run_id { app.stream_text(&t); }
+            if id == app.run_id {
+                app.stream_text(&t);
+            }
         }
         AppMsg::ToolStart(id, name) => {
-            if id == app.run_id { app.tool_start(name); }
+            if id == app.run_id {
+                app.tool_start(name);
+            }
         }
-        AppMsg::ToolResult { run_id, name, content, ok } => {
-            if run_id == app.run_id { app.tool_end(name, ok, content); }
+        AppMsg::ToolResult {
+            run_id,
+            name,
+            content,
+            ok,
+        } => {
+            if run_id == app.run_id {
+                app.tool_end(name, ok, content);
+            }
         }
         AppMsg::Done(id) => {
-            if id == app.run_id { app.finish_run(None); }
+            if id == app.run_id {
+                app.finish_run(None);
+            }
         }
         AppMsg::Error(id, e) => {
             if id == app.run_id {
@@ -232,8 +245,11 @@ async fn handle_key(
             }
         }
         KeyCode::Tab => {
-            if app.at_visible { app.complete_at(); }
-            else if app.suggestion_visible { app.complete_suggestion(); }
+            if app.at_visible {
+                app.complete_at();
+            } else if app.suggestion_visible {
+                app.complete_suggestion();
+            }
         }
         KeyCode::Enter => {
             if app.at_visible {
@@ -315,9 +331,7 @@ async fn handle_key(
                         return Ok(());
                     } else {
                         // first press — show hint
-                        app.push_system(
-                            "Press Ctrl+C again to exit  (or /quit)".to_string(),
-                        );
+                        app.push_system("Press Ctrl+C again to exit  (or /quit)".to_string());
                     }
                 }
             }
@@ -353,14 +367,22 @@ async fn handle_key(
             app.show_help = !app.show_help;
         }
         KeyCode::Up => {
-            if app.at_visible { app.at_prev(); }
-            else if app.suggestion_visible { app.suggestion_prev(); }
-            else { app.history_prev(); }
+            if app.at_visible {
+                app.at_prev();
+            } else if app.suggestion_visible {
+                app.suggestion_prev();
+            } else {
+                app.history_prev();
+            }
         }
         KeyCode::Down => {
-            if app.at_visible { app.at_next(); }
-            else if app.suggestion_visible { app.suggestion_next(); }
-            else { app.history_next(); }
+            if app.at_visible {
+                app.at_next();
+            } else if app.suggestion_visible {
+                app.suggestion_next();
+            } else {
+                app.history_next();
+            }
         }
         KeyCode::Left => app.move_left(),
         KeyCode::Right => app.move_right(),
@@ -481,7 +503,9 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
                         let _ = plan_tx.send(Msg::App(AppMsg::Plan(plan))).await;
                     }
                     Err(e) => {
-                        let _ = plan_tx.send(Msg::App(AppMsg::Error(plan_run_id, e.to_string()))).await;
+                        let _ = plan_tx
+                            .send(Msg::App(AppMsg::Error(plan_run_id, e.to_string())))
+                            .await;
                     }
                 }
             });

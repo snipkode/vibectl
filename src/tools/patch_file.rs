@@ -164,7 +164,10 @@ fn apply_patch(original: &str, patch: &str) -> Result<String> {
                     }
                 }) {
                     // Remove: verify the line matches, then advance cursor.
-                    let orig = orig_lines.get(cursor + orig_consumed).copied().unwrap_or("");
+                    let orig = orig_lines
+                        .get(cursor + orig_consumed)
+                        .copied()
+                        .unwrap_or("");
                     if orig != rest {
                         bail!(
                             "patch mismatch at original line {}: expected {:?}, got {:?}",
@@ -188,7 +191,10 @@ fn apply_patch(original: &str, patch: &str) -> Result<String> {
                 } else {
                     // Context line (space prefix or bare line).
                     let ctx = if hl.starts_with(' ') { &hl[1..] } else { hl };
-                    let orig = orig_lines.get(cursor + orig_consumed).copied().unwrap_or("");
+                    let orig = orig_lines
+                        .get(cursor + orig_consumed)
+                        .copied()
+                        .unwrap_or("");
                     if orig != ctx {
                         bail!(
                             "context mismatch at original line {}: expected {:?}, got {:?}",

@@ -49,29 +49,30 @@ pub enum Intent {
 
 impl Intent {
     /// Human-readable label used in LLM prompt and logs.
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Self::Conversational => "conversational",
-            Self::Informational  => "informational",
-            Self::CodeWrite      => "code_write",
-            Self::Refactor       => "refactor",
-            Self::ShellExec      => "shell_exec",
-            Self::GitOp          => "git",
-            Self::Deploy         => "deploy",
+            Self::Informational => "informational",
+            Self::CodeWrite => "code_write",
+            Self::Refactor => "refactor",
+            Self::ShellExec => "shell_exec",
+            Self::GitOp => "git",
+            Self::Deploy => "deploy",
         }
     }
 
     /// Parse from LLM-returned string (case-insensitive).
     pub fn from_label(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
-            "conversational"             => Some(Self::Conversational),
-            "informational"              => Some(Self::Informational),
-            "code_write" | "write"       => Some(Self::CodeWrite),
-            "refactor"                   => Some(Self::Refactor),
-            "shell_exec" | "shell"       => Some(Self::ShellExec),
-            "git" | "gitop" | "git_op"   => Some(Self::GitOp),
-            "deploy"                     => Some(Self::Deploy),
-            _                            => None,
+            "conversational" => Some(Self::Conversational),
+            "informational" => Some(Self::Informational),
+            "code_write" | "write" => Some(Self::CodeWrite),
+            "refactor" => Some(Self::Refactor),
+            "shell_exec" | "shell" => Some(Self::ShellExec),
+            "git" | "gitop" | "git_op" => Some(Self::GitOp),
+            "deploy" => Some(Self::Deploy),
+            _ => None,
         }
     }
 }
@@ -80,93 +81,261 @@ impl Intent {
 
 const CONVERSATIONAL_SIGNALS: &[&str] = &[
     // English
-    "hi", "hello", "hey", "thanks", "thank you", "ok", "okay",
-    "noted", "got it", "understood", "great", "nice", "cool", "awesome",
-    "bye", "goodbye", "see you", "sure", "agreed", "yes", "no",
-    "good morning", "good afternoon", "good evening", "good night",
+    "hi",
+    "hello",
+    "hey",
+    "thanks",
+    "thank you",
+    "ok",
+    "okay",
+    "noted",
+    "got it",
+    "understood",
+    "great",
+    "nice",
+    "cool",
+    "awesome",
+    "bye",
+    "goodbye",
+    "see you",
+    "sure",
+    "agreed",
+    "yes",
+    "no",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "good night",
     // Indonesian
-    "halo", "hai", "hei", "oke", "sip", "mantap", "terima kasih",
-    "makasih", "iya", "tidak", "setuju", "lanjut", "siap",
-    "selamat pagi", "selamat siang", "selamat malam",
+    "halo",
+    "hai",
+    "hei",
+    "oke",
+    "sip",
+    "mantap",
+    "terima kasih",
+    "makasih",
+    "iya",
+    "tidak",
+    "setuju",
+    "lanjut",
+    "siap",
+    "selamat pagi",
+    "selamat siang",
+    "selamat malam",
 ];
 
 /// Deploy signals — highest priority among task intents.
 const DEPLOY_SIGNALS: &[&str] = &[
-    "deploy", "to production", "ke production", "to prod", "ke prod",
-    "to staging", "ke staging", " prod ", "docker push", "kubectl",
-    "helm ", "kubernetes", "k8s", "run migration", "jalankan migration",
-    "database migration", "db migration", "release to", "publish to",
+    "deploy",
+    "to production",
+    "ke production",
+    "to prod",
+    "ke prod",
+    "to staging",
+    "ke staging",
+    " prod ",
+    "docker push",
+    "kubectl",
+    "helm ",
+    "kubernetes",
+    "k8s",
+    "run migration",
+    "jalankan migration",
+    "database migration",
+    "db migration",
+    "release to",
+    "publish to",
     "ship it",
 ];
 
 const GIT_SIGNALS: &[&str] = &[
-    "git commit", "git push", "git pull", "git stash", "git diff",
-    "git log", "git branch", "git checkout", "git merge", "git rebase",
-    "git status", "git add", "git reset", "git tag",
-    "commit all", "commit perubahan", "push to ", "push ke ",
-    "create branch", "buat branch", "switch branch", "pindah branch",
-    "new branch", "checkout ke", "merge ke", "rebase ke",
-    "stash changes", "pop stash",
+    "git commit",
+    "git push",
+    "git pull",
+    "git stash",
+    "git diff",
+    "git log",
+    "git branch",
+    "git checkout",
+    "git merge",
+    "git rebase",
+    "git status",
+    "git add",
+    "git reset",
+    "git tag",
+    "commit all",
+    "commit perubahan",
+    "push to ",
+    "push ke ",
+    "create branch",
+    "buat branch",
+    "switch branch",
+    "pindah branch",
+    "new branch",
+    "checkout ke",
+    "merge ke",
+    "rebase ke",
+    "stash changes",
+    "pop stash",
 ];
 
 const SHELL_SIGNALS: &[&str] = &[
-    "cargo ", "npm ", "pip ", "yarn ", "make ", "go run", "go build",
-    "python ", "node ", "mvn ", "gradle ",
-    "$ ", "./", "run tests", "run the tests", "jalankan tests",
-    "run build", "jalankan build", "restart ",
-    "start server", "stop server",
+    "cargo ",
+    "npm ",
+    "pip ",
+    "yarn ",
+    "make ",
+    "go run",
+    "go build",
+    "python ",
+    "node ",
+    "mvn ",
+    "gradle ",
+    "$ ",
+    "./",
+    "run tests",
+    "run the tests",
+    "jalankan tests",
+    "run build",
+    "jalankan build",
+    "restart ",
+    "start server",
+    "stop server",
 ];
 
 const REFACTOR_SIGNALS: &[&str] = &[
-    "refactor", "refaktor", "rename all", "ubah nama semua",
-    "restructure", "reorganize", "reorganisasi",
-    "extract ", "split into", "pisahkan", "merge into", "gabungkan",
-    "migrate from", "redesign", "rewrite", "modularize", "decouple",
-    "clean up ", "bersihkan ",
+    "refactor",
+    "refaktor",
+    "rename all",
+    "ubah nama semua",
+    "restructure",
+    "reorganize",
+    "reorganisasi",
+    "extract ",
+    "split into",
+    "pisahkan",
+    "merge into",
+    "gabungkan",
+    "migrate from",
+    "redesign",
+    "rewrite",
+    "modularize",
+    "decouple",
+    "clean up ",
+    "bersihkan ",
 ];
 
 const SCOPE_AMPLIFIERS: &[&str] = &[
-    "entire", "all ", "throughout", "across ", "everywhere",
-    "every file", "all files", "semua", "seluruh", "setiap",
+    "entire",
+    "all ",
+    "throughout",
+    "across ",
+    "everywhere",
+    "every file",
+    "all files",
+    "semua",
+    "seluruh",
+    "setiap",
 ];
 
 const TASK_VERBS: &[&str] = &[
-    "implement", "create ", "add ", "fix ", "write ", "build ",
-    "generate ", "scaffold ", "make ", "insert ", "append ",
-    "define ", "initialize ", "setup ", "buat ", "tambah ",
-    "tambahkan ", "perbaiki ", "tulis ", "bikin ", "implementasi ",
+    "implement",
+    "create ",
+    "add ",
+    "fix ",
+    "write ",
+    "build ",
+    "generate ",
+    "scaffold ",
+    "make ",
+    "insert ",
+    "append ",
+    "define ",
+    "initialize ",
+    "setup ",
+    "buat ",
+    "tambah ",
+    "tambahkan ",
+    "perbaiki ",
+    "tulis ",
+    "bikin ",
+    "implementasi ",
 ];
 
 const QUESTION_STARTERS: &[&str] = &[
-    "what ", "how ", "why ", "when ", "where ", "who ", "which ",
-    "can you ", "could you ", "do you ", "did you ", "is it ",
-    "are you ", "explain ", "describe ", "tell me ", "show me ",
-    "list all", "find all", "search for",
+    "what ",
+    "how ",
+    "why ",
+    "when ",
+    "where ",
+    "who ",
+    "which ",
+    "can you ",
+    "could you ",
+    "do you ",
+    "did you ",
+    "is it ",
+    "are you ",
+    "explain ",
+    "describe ",
+    "tell me ",
+    "show me ",
+    "list all",
+    "find all",
+    "search for",
     // Indonesian
-    "apa ", "bagaimana ", "kenapa ", "mengapa ", "kapan ", "siapa ",
-    "boleh ", "bisa ", "apakah ", "jelaskan ", "ceritakan ",
-    "tolong jelaskan", "tampilkan ", "cari ",
+    "apa ",
+    "bagaimana ",
+    "kenapa ",
+    "mengapa ",
+    "kapan ",
+    "siapa ",
+    "boleh ",
+    "bisa ",
+    "apakah ",
+    "jelaskan ",
+    "ceritakan ",
+    "tolong jelaskan",
+    "tampilkan ",
+    "cari ",
+    "analisa ",
+    "analyze ",
+    "analisis ",
+    "review ",
+    "audit ",
+    "inspect ",
 ];
 
 const PREF_SIGNALS: &[&str] = &[
-    "pake ", "pakai ", "gunakan ", "speak ", "talk in ",
-    "bahasa ", "language ", "in english", "in indonesian",
-    "please use", "mohon ", "tolong gunakan",
-    "switch to ", "ganti ke ", "use english", "use indonesian",
+    "pake ",
+    "pakai ",
+    "gunakan ",
+    "speak ",
+    "talk in ",
+    "bahasa ",
+    "language ",
+    "in english",
+    "in indonesian",
+    "please use",
+    "mohon ",
+    "tolong gunakan",
+    "switch to ",
+    "ganti ke ",
+    "use english",
+    "use indonesian",
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn has_file_ref(input: &str) -> bool {
     let code_exts = [
-        ".rs", ".py", ".js", ".ts", ".go", ".toml", ".md",
-        ".json", ".yaml", ".yml", ".html", ".css", ".sh",
-        ".tsx", ".jsx", ".sql",
+        ".rs", ".py", ".js", ".ts", ".go", ".toml", ".md", ".json", ".yaml", ".yml", ".html",
+        ".css", ".sh", ".tsx", ".jsx", ".sql",
     ];
     input.split_whitespace().any(|w| {
         let w = w.trim_matches(|c: char| ",;:?!()[]{}\"'".contains(c));
-        code_exts.iter().any(|e| w.ends_with(e))
-            || (w.contains('/') && !w.starts_with("http"))
+        code_exts.iter().any(|e| w.ends_with(e)) || (w.contains('/') && !w.starts_with("http"))
     })
 }
 
@@ -207,8 +376,8 @@ pub fn intent_rules(input: &str) -> Option<Intent> {
 
     // 4. Very short input with no remaining technical signals → Conversational
     if word_count <= 3 {
-        let has_path     = trimmed.contains("--");
-        let has_task     = TASK_VERBS.iter().any(|v| lower.starts_with(v));
+        let has_path = trimmed.contains("--");
+        let has_task = TASK_VERBS.iter().any(|v| lower.starts_with(v));
         let has_refactor = contains_any(&lower, REFACTOR_SIGNALS);
         let has_question = starts_with_any(&lower, QUESTION_STARTERS);
         if !has_path && !has_task && !has_refactor && !has_question {
@@ -235,8 +404,8 @@ pub fn intent_rules(input: &str) -> Option<Intent> {
 
     // 7. Refactor — broad restructuring
     let has_refactor = contains_any(&lower, REFACTOR_SIGNALS);
-    let has_scope    = contains_any(&lower, SCOPE_AMPLIFIERS);
-    let has_task     = contains_any(&lower, TASK_VERBS);
+    let has_scope = contains_any(&lower, SCOPE_AMPLIFIERS);
+    let has_task = contains_any(&lower, TASK_VERBS);
     if has_refactor || (has_scope && has_task) {
         return Some(Intent::Refactor);
     }
@@ -274,11 +443,7 @@ pub fn intent_rules(input: &str) -> Option<Intent> {
 /// Classify intent via LLM when rules are ambiguous.
 /// Single message, max_tokens=30, no tools, temperature=0.
 /// Falls back to `Intent::CodeWrite` on any error.
-pub async fn classify_intent_llm(
-    input: &str,
-    model: &str,
-    provider: Arc<dyn Provider>,
-) -> Intent {
+pub async fn classify_intent_llm(input: &str, model: &str, provider: Arc<dyn Provider>) -> Intent {
     let prompt = format!(
         "Classify this user message into exactly one intent.\n\
          Respond ONLY with JSON: {{\"intent\": \"<label>\"}}\n\n\
@@ -317,8 +482,13 @@ pub async fn classify_intent_llm(
             // Scan raw text for any label keyword
             let lower = text.to_lowercase();
             for label in &[
-                "conversational", "informational", "code_write",
-                "refactor", "shell_exec", "git", "deploy",
+                "conversational",
+                "informational",
+                "code_write",
+                "refactor",
+                "shell_exec",
+                "git",
+                "deploy",
             ] {
                 if lower.contains(label) {
                     if let Some(intent) = Intent::from_label(label) {
@@ -334,11 +504,7 @@ pub async fn classify_intent_llm(
 
 /// Full two-stage intent classification.
 /// Rules first → LLM fallback if None.
-pub async fn classify_intent(
-    input: &str,
-    model: &str,
-    provider: Arc<dyn Provider>,
-) -> Intent {
+pub async fn classify_intent(input: &str, model: &str, provider: Arc<dyn Provider>) -> Intent {
     if let Some(intent) = intent_rules(input) {
         return intent;
     }
@@ -351,20 +517,22 @@ pub async fn classify_intent(
 mod tests {
     use super::*;
 
-    fn r(input: &str) -> Option<Intent> { intent_rules(input) }
+    fn r(input: &str) -> Option<Intent> {
+        intent_rules(input)
+    }
 
     #[test]
     fn conversational_greetings() {
-        assert_eq!(r("halo"),               Some(Intent::Conversational));
-        assert_eq!(r("hali"),               Some(Intent::Conversational));
-        assert_eq!(r("hi"),                 Some(Intent::Conversational));
-        assert_eq!(r("hello"),              Some(Intent::Conversational));
-        assert_eq!(r("thanks"),             Some(Intent::Conversational));
-        assert_eq!(r("ok"),                 Some(Intent::Conversational));
-        assert_eq!(r("mantap"),             Some(Intent::Conversational));
-        assert_eq!(r("terima kasih"),       Some(Intent::Conversational));
-        assert_eq!(r("ok sip"),             Some(Intent::Conversational));
-        assert_eq!(r("noted"),              Some(Intent::Conversational));
+        assert_eq!(r("halo"), Some(Intent::Conversational));
+        assert_eq!(r("hali"), Some(Intent::Conversational));
+        assert_eq!(r("hi"), Some(Intent::Conversational));
+        assert_eq!(r("hello"), Some(Intent::Conversational));
+        assert_eq!(r("thanks"), Some(Intent::Conversational));
+        assert_eq!(r("ok"), Some(Intent::Conversational));
+        assert_eq!(r("mantap"), Some(Intent::Conversational));
+        assert_eq!(r("terima kasih"), Some(Intent::Conversational));
+        assert_eq!(r("ok sip"), Some(Intent::Conversational));
+        assert_eq!(r("noted"), Some(Intent::Conversational));
         assert_eq!(r("pake bahasa indonesia"), Some(Intent::Conversational));
         assert_eq!(r("use english please"), Some(Intent::Conversational));
         assert_eq!(r("bahasa indonesia ya"), Some(Intent::Conversational));
@@ -372,12 +540,18 @@ mod tests {
 
     #[test]
     fn informational_questions() {
-        assert_eq!(r("how does the agent loop work?"),   Some(Intent::Informational));
-        assert_eq!(r("explain the tool dispatch"),       Some(Intent::Informational));
-        assert_eq!(r("what is a steering file?"),        Some(Intent::Informational));
-        assert_eq!(r("what commands are available?"),    Some(Intent::Informational));
-        assert_eq!(r("describe the architecture"),       Some(Intent::Informational));
-        assert_eq!(r("list all available tools"),        Some(Intent::Informational));
+        assert_eq!(
+            r("how does the agent loop work?"),
+            Some(Intent::Informational)
+        );
+        assert_eq!(r("explain the tool dispatch"), Some(Intent::Informational));
+        assert_eq!(r("what is a steering file?"), Some(Intent::Informational));
+        assert_eq!(
+            r("what commands are available?"),
+            Some(Intent::Informational)
+        );
+        assert_eq!(r("describe the architecture"), Some(Intent::Informational));
+        assert_eq!(r("list all available tools"), Some(Intent::Informational));
     }
 
     #[test]
@@ -389,49 +563,67 @@ mod tests {
 
     #[test]
     fn code_write_tasks() {
-        assert_eq!(r("implement pagination for the API endpoint"), Some(Intent::CodeWrite));
-        assert_eq!(r("add unit tests to agent/mod.rs"),            Some(Intent::CodeWrite));
-        assert_eq!(r("fix the bug in session.rs"),                 Some(Intent::CodeWrite));
-        assert_eq!(r("create a new tool for web scraping"),        Some(Intent::CodeWrite));
-        assert_eq!(r("buat fungsi baru di tools/mod.rs"),          Some(Intent::CodeWrite));
-        assert_eq!(r("tambahkan error handling di config.rs"),     Some(Intent::CodeWrite));
+        assert_eq!(
+            r("implement pagination for the API endpoint"),
+            Some(Intent::CodeWrite)
+        );
+        assert_eq!(r("add unit tests to agent/mod.rs"), Some(Intent::CodeWrite));
+        assert_eq!(r("fix the bug in session.rs"), Some(Intent::CodeWrite));
+        assert_eq!(
+            r("create a new tool for web scraping"),
+            Some(Intent::CodeWrite)
+        );
+        assert_eq!(
+            r("buat fungsi baru di tools/mod.rs"),
+            Some(Intent::CodeWrite)
+        );
+        assert_eq!(
+            r("tambahkan error handling di config.rs"),
+            Some(Intent::CodeWrite)
+        );
     }
 
     #[test]
     fn refactor_tasks() {
-        assert_eq!(r("refactor the entire auth module"),                   Some(Intent::Refactor));
-        assert_eq!(r("rename all occurrences of getUserName"),             Some(Intent::Refactor));
-        assert_eq!(r("extract the approval logic into a separate module"), Some(Intent::Refactor));
-        assert_eq!(r("restructure the project layout"),                    Some(Intent::Refactor));
-        assert_eq!(r("refaktor modul autentikasi"),                        Some(Intent::Refactor));
+        assert_eq!(r("refactor the entire auth module"), Some(Intent::Refactor));
+        assert_eq!(
+            r("rename all occurrences of getUserName"),
+            Some(Intent::Refactor)
+        );
+        assert_eq!(
+            r("extract the approval logic into a separate module"),
+            Some(Intent::Refactor)
+        );
+        assert_eq!(r("restructure the project layout"), Some(Intent::Refactor));
+        assert_eq!(r("refaktor modul autentikasi"), Some(Intent::Refactor));
     }
 
     #[test]
     fn shell_exec_tasks() {
-        assert_eq!(r("cargo test"),          Some(Intent::ShellExec));
-        assert_eq!(r("run the tests"),       Some(Intent::ShellExec));
-        assert_eq!(r("npm install"),         Some(Intent::ShellExec));
-        assert_eq!(r("jalankan tests"),      Some(Intent::ShellExec));
+        assert_eq!(r("cargo test"), Some(Intent::ShellExec));
+        assert_eq!(r("run the tests"), Some(Intent::ShellExec));
+        assert_eq!(r("npm install"), Some(Intent::ShellExec));
+        assert_eq!(r("jalankan tests"), Some(Intent::ShellExec));
         assert_eq!(r("cargo build --release"), Some(Intent::ShellExec));
     }
 
     #[test]
     fn git_tasks() {
-        assert_eq!(r("git commit all changes"),      Some(Intent::GitOp));
-        assert_eq!(r("git push to origin"),          Some(Intent::GitOp));
+        assert_eq!(r("git commit all changes"), Some(Intent::GitOp));
+        assert_eq!(r("git push to origin"), Some(Intent::GitOp));
         assert_eq!(r("create branch feature/login"), Some(Intent::GitOp));
-        assert_eq!(r("buat branch feature/auth"),    Some(Intent::GitOp));
-        assert_eq!(r("git stash"),                   Some(Intent::GitOp));
-        assert_eq!(r("commit perubahan ini"),        Some(Intent::GitOp));
+        assert_eq!(r("buat branch feature/auth"), Some(Intent::GitOp));
+        assert_eq!(r("git stash"), Some(Intent::GitOp));
+        assert_eq!(r("commit perubahan ini"), Some(Intent::GitOp));
     }
 
     #[test]
     fn deploy_tasks() {
-        assert_eq!(r("deploy ke production"),              Some(Intent::Deploy));
-        assert_eq!(r("deploy to staging"),                 Some(Intent::Deploy));
-        assert_eq!(r("run migration"),                     Some(Intent::Deploy));
-        assert_eq!(r("jalankan migration"),                Some(Intent::Deploy));
-        assert_eq!(r("kubectl apply -f deployment.yaml"),  Some(Intent::Deploy));
+        assert_eq!(r("deploy ke production"), Some(Intent::Deploy));
+        assert_eq!(r("deploy to staging"), Some(Intent::Deploy));
+        assert_eq!(r("run migration"), Some(Intent::Deploy));
+        assert_eq!(r("jalankan migration"), Some(Intent::Deploy));
+        assert_eq!(r("kubectl apply -f deployment.yaml"), Some(Intent::Deploy));
     }
 
     #[test]
@@ -442,16 +634,21 @@ mod tests {
 
     #[test]
     fn ambiguous_returns_none() {
-        assert_eq!(r("what does session.rs do?"),                       None);
+        assert_eq!(r("what does session.rs do?"), None);
         assert_eq!(r("the agent seems to be calling tools unexpectedly"), None);
-        assert_eq!(r("show me the current model configuration"),         None);
+        assert_eq!(r("show me the current model configuration"), None);
     }
 
     #[test]
     fn from_label_roundtrip() {
         let intents = [
-            Intent::Conversational, Intent::Informational, Intent::CodeWrite,
-            Intent::Refactor, Intent::ShellExec, Intent::GitOp, Intent::Deploy,
+            Intent::Conversational,
+            Intent::Informational,
+            Intent::CodeWrite,
+            Intent::Refactor,
+            Intent::ShellExec,
+            Intent::GitOp,
+            Intent::Deploy,
         ];
         for intent in &intents {
             assert_eq!(Intent::from_label(intent.label()), Some(intent.clone()));

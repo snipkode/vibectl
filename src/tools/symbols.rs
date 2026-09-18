@@ -63,12 +63,24 @@ The `kind` filter is optional — omit it to list all symbols."#,
             .with_context(|| format!("failed to read {}", target.display()))?;
 
         let symbols = match ext.as_str() {
-            "rs" => extract_symbols(&source, rust_language(), &RUST_RULES, kind_filter.as_deref()),
-            "py" => extract_symbols(&source, python_language(), &PYTHON_RULES, kind_filter.as_deref()),
+            "rs" => extract_symbols(
+                &source,
+                rust_language(),
+                &RUST_RULES,
+                kind_filter.as_deref(),
+            ),
+            "py" => extract_symbols(
+                &source,
+                python_language(),
+                &PYTHON_RULES,
+                kind_filter.as_deref(),
+            ),
             "js" | "jsx" | "mjs" | "cjs" => {
                 extract_symbols(&source, js_language(), &JS_RULES, kind_filter.as_deref())
             }
-            "ts" | "tsx" => extract_symbols(&source, ts_language(), &TS_RULES, kind_filter.as_deref()),
+            "ts" | "tsx" => {
+                extract_symbols(&source, ts_language(), &TS_RULES, kind_filter.as_deref())
+            }
             "go" => extract_symbols(&source, go_language(), &GO_RULES, kind_filter.as_deref()),
             other => {
                 bail!(
@@ -130,52 +142,188 @@ struct Rule {
 }
 
 const RUST_RULES: &[Rule] = &[
-    Rule { node_type: "function_item",       kind: "function", name_field: "name" },
-    Rule { node_type: "struct_item",         kind: "struct",   name_field: "name" },
-    Rule { node_type: "enum_item",           kind: "enum",     name_field: "name" },
-    Rule { node_type: "trait_item",          kind: "trait",    name_field: "name" },
-    Rule { node_type: "impl_item",           kind: "impl",     name_field: "type" },
-    Rule { node_type: "type_item",           kind: "type",     name_field: "name" },
-    Rule { node_type: "const_item",          kind: "const",    name_field: "name" },
-    Rule { node_type: "static_item",         kind: "static",   name_field: "name" },
-    Rule { node_type: "mod_item",            kind: "mod",      name_field: "name" },
-    Rule { node_type: "macro_definition",    kind: "macro",    name_field: "name" },
+    Rule {
+        node_type: "function_item",
+        kind: "function",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "struct_item",
+        kind: "struct",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "enum_item",
+        kind: "enum",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "trait_item",
+        kind: "trait",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "impl_item",
+        kind: "impl",
+        name_field: "type",
+    },
+    Rule {
+        node_type: "type_item",
+        kind: "type",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "const_item",
+        kind: "const",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "static_item",
+        kind: "static",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "mod_item",
+        kind: "mod",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "macro_definition",
+        kind: "macro",
+        name_field: "name",
+    },
 ];
 
 const PYTHON_RULES: &[Rule] = &[
-    Rule { node_type: "function_definition", kind: "function", name_field: "name" },
-    Rule { node_type: "async_function_definition", kind: "function", name_field: "name" },
-    Rule { node_type: "class_definition",    kind: "class",    name_field: "name" },
-    Rule { node_type: "decorated_definition", kind: "decorated", name_field: "definition" },
+    Rule {
+        node_type: "function_definition",
+        kind: "function",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "async_function_definition",
+        kind: "function",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "class_definition",
+        kind: "class",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "decorated_definition",
+        kind: "decorated",
+        name_field: "definition",
+    },
 ];
 
 const JS_RULES: &[Rule] = &[
-    Rule { node_type: "function_declaration",        kind: "function", name_field: "name" },
-    Rule { node_type: "generator_function_declaration", kind: "function", name_field: "name" },
-    Rule { node_type: "class_declaration",           kind: "class",    name_field: "name" },
-    Rule { node_type: "method_definition",           kind: "method",   name_field: "name" },
-    Rule { node_type: "lexical_declaration",         kind: "const",    name_field: "name" },
-    Rule { node_type: "variable_declaration",        kind: "var",      name_field: "name" },
+    Rule {
+        node_type: "function_declaration",
+        kind: "function",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "generator_function_declaration",
+        kind: "function",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "class_declaration",
+        kind: "class",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "method_definition",
+        kind: "method",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "lexical_declaration",
+        kind: "const",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "variable_declaration",
+        kind: "var",
+        name_field: "name",
+    },
 ];
 
 const TS_RULES: &[Rule] = &[
-    Rule { node_type: "function_declaration",        kind: "function",  name_field: "name" },
-    Rule { node_type: "generator_function_declaration", kind: "function", name_field: "name" },
-    Rule { node_type: "class_declaration",           kind: "class",     name_field: "name" },
-    Rule { node_type: "method_definition",           kind: "method",    name_field: "name" },
-    Rule { node_type: "interface_declaration",       kind: "interface", name_field: "name" },
-    Rule { node_type: "type_alias_declaration",      kind: "type",      name_field: "name" },
-    Rule { node_type: "enum_declaration",            kind: "enum",      name_field: "name" },
-    Rule { node_type: "lexical_declaration",         kind: "const",     name_field: "name" },
-    Rule { node_type: "abstract_class_declaration",  kind: "class",     name_field: "name" },
+    Rule {
+        node_type: "function_declaration",
+        kind: "function",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "generator_function_declaration",
+        kind: "function",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "class_declaration",
+        kind: "class",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "method_definition",
+        kind: "method",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "interface_declaration",
+        kind: "interface",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "type_alias_declaration",
+        kind: "type",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "enum_declaration",
+        kind: "enum",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "lexical_declaration",
+        kind: "const",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "abstract_class_declaration",
+        kind: "class",
+        name_field: "name",
+    },
 ];
 
 const GO_RULES: &[Rule] = &[
-    Rule { node_type: "function_declaration",  kind: "function", name_field: "name" },
-    Rule { node_type: "method_declaration",    kind: "method",   name_field: "name" },
-    Rule { node_type: "type_declaration",      kind: "type",     name_field: "name" },
-    Rule { node_type: "const_declaration",     kind: "const",    name_field: "name" },
-    Rule { node_type: "var_declaration",       kind: "var",      name_field: "name" },
+    Rule {
+        node_type: "function_declaration",
+        kind: "function",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "method_declaration",
+        kind: "method",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "type_declaration",
+        kind: "type",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "const_declaration",
+        kind: "const",
+        name_field: "name",
+    },
+    Rule {
+        node_type: "var_declaration",
+        kind: "var",
+        name_field: "name",
+    },
 ];
 
 // ─── Language constructors ────────────────────────────────────────────────────

@@ -16,58 +16,58 @@ use unicode_width::UnicodeWidthChar;
 //  • All "hint" text must be ≥3:1 contrast — minimum readable gray is #6b7280
 
 // ── Backgrounds (darkest → lightest) ─────────────────────────────────────────
-const C_BASE:     Color = Color::Rgb(12,  12,  20 ); // terminal fill
-const C_SURFACE:  Color = Color::Rgb(16,  16,  26 ); // chat body bg
-const C_SURFACE2: Color = Color::Rgb(22,  22,  34 ); // elevated card / modal
-const C_SURFACE3: Color = Color::Rgb(30,  32,  48 ); // input box — visibly lifted
+const C_BASE: Color = Color::Rgb(12, 12, 20); // terminal fill
+const C_SURFACE: Color = Color::Rgb(16, 16, 26); // chat body bg
+const C_SURFACE2: Color = Color::Rgb(22, 22, 34); // elevated card / modal
+const C_SURFACE3: Color = Color::Rgb(30, 32, 48); // input box — visibly lifted
 
 // ── Borders ───────────────────────────────────────────────────────────────────
-const C_BORDER:        Color = Color::Rgb(52,  58,  82 ); // default border
-const C_BORDER_BRIGHT: Color = Color::Rgb(72,  82, 120 ); // hover / focus border
+const C_BORDER: Color = Color::Rgb(52, 58, 82); // default border
+const C_BORDER_BRIGHT: Color = Color::Rgb(72, 82, 120); // hover / focus border
 
 // ── Header ────────────────────────────────────────────────────────────────────
-const C_HDR_BG:   Color = Color::Rgb(10,  10,  18 ); // darkest strip
-const C_HDR_LOGO: Color = Color::Rgb(99, 168, 249 ); // brand blue (vibrant)
-const C_HDR_SEP:  Color = Color::Rgb(38,  44,  66 ); // separator line
-const C_HDR_VAL:  Color = Color::Rgb(158, 172, 210); // provider/model text — good contrast
+const C_HDR_BG: Color = Color::Rgb(10, 10, 18); // darkest strip
+const C_HDR_LOGO: Color = Color::Rgb(99, 168, 249); // brand blue (vibrant)
+const C_HDR_SEP: Color = Color::Rgb(38, 44, 66); // separator line
+const C_HDR_VAL: Color = Color::Rgb(158, 172, 210); // provider/model text — good contrast
 const C_HDR_META: Color = Color::Rgb(108, 118, 158); // cwd/path — readable muted
 
 // ── User messages ─────────────────────────────────────────────────────────────
-const C_USER_MARK: Color = Color::Rgb(74,  222, 128); // green-400
+const C_USER_MARK: Color = Color::Rgb(74, 222, 128); // green-400
 const C_USER_TEXT: Color = Color::Rgb(230, 236, 250); // near-white
 
 // ── Agent messages ────────────────────────────────────────────────────────────
-const C_AGENT_MARK: Color = Color::Rgb(99,  168, 249); // blue-400
+const C_AGENT_MARK: Color = Color::Rgb(99, 168, 249); // blue-400
 const C_AGENT_TEXT: Color = Color::Rgb(205, 222, 255); // light periwinkle
 
 // ── Tool calls ────────────────────────────────────────────────────────────────
-const C_TOOL_MARK: Color = Color::Rgb(251, 191,  36 ); // amber-400
-const C_TOOL_TEXT: Color = Color::Rgb(180, 160,  90 ); // readable amber-muted
+const C_TOOL_MARK: Color = Color::Rgb(251, 191, 36); // amber-400
+const C_TOOL_TEXT: Color = Color::Rgb(180, 160, 90); // readable amber-muted
 
 // ── Errors ────────────────────────────────────────────────────────────────────
-const C_ERROR_MARK: Color = Color::Rgb(248,  90,  90 ); // red-500
-const C_ERROR_TEXT: Color = Color::Rgb(255, 160, 160 ); // light red
+const C_ERROR_MARK: Color = Color::Rgb(248, 90, 90); // red-500
+const C_ERROR_TEXT: Color = Color::Rgb(255, 160, 160); // light red
 
 // ── System / meta ─────────────────────────────────────────────────────────────
-const C_SYS_TEXT:  Color = Color::Rgb(110, 120, 155); // readable muted — ≥3:1
+const C_SYS_TEXT: Color = Color::Rgb(110, 120, 155); // readable muted — ≥3:1
 
 // ── Plan ──────────────────────────────────────────────────────────────────────
-const C_PLAN_MARK: Color = Color::Rgb(251, 191,  36 ); // amber-400
-const C_PLAN_TEXT: Color = Color::Rgb(230, 210, 120 ); // warm yellow — readable
+const C_PLAN_MARK: Color = Color::Rgb(251, 191, 36); // amber-400
+const C_PLAN_TEXT: Color = Color::Rgb(230, 210, 120); // warm yellow — readable
 
 // ── Code blocks ──────────────────────────────────────────────────────────────
-const C_CODE_TEXT: Color = Color::Rgb(134, 198, 134 ); // muted green — readable
+const C_CODE_TEXT: Color = Color::Rgb(134, 198, 134); // muted green — readable
 
 // ── Input box ─────────────────────────────────────────────────────────────────
-const C_INPUT_BORDER: Color = Color::Rgb(52,  62,  95 ); // resting border
-const C_INPUT_ACTIVE: Color = Color::Rgb(78,  130, 210); // focused / has-text border + send btn
-const C_PROMPT:       Color = Color::Rgb(74,  222, 128); // green prompt glyph
-const C_CURSOR:       Color = Color::Rgb(74,  222, 128); // green cursor
+const C_INPUT_BORDER: Color = Color::Rgb(52, 62, 95); // resting border
+const C_INPUT_ACTIVE: Color = Color::Rgb(78, 130, 210); // focused / has-text border + send btn
+const C_PROMPT: Color = Color::Rgb(74, 222, 128); // green prompt glyph
+const C_CURSOR: Color = Color::Rgb(74, 222, 128); // green cursor
 
 // ── Hints & placeholders ──────────────────────────────────────────────────────
 //  Must be ≥3:1 on C_SURFACE (#101018) → minimum ~#6b7080
-const C_HINT:        Color = Color::Rgb(100, 110, 145); // was 58,64,88 — now readable
-const C_PLACEHOLDER: Color = Color::Rgb( 88,  96, 130); // was 68,76,104 — lifted
+const C_HINT: Color = Color::Rgb(100, 110, 145); // was 58,64,88 — now readable
+const C_PLACEHOLDER: Color = Color::Rgb(88, 96, 130); // was 68,76,104 — lifted
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -91,8 +91,7 @@ fn cursor_visible(app: &App) -> bool {
 ///   body    = rest
 fn main_areas(area: Rect, with_input: bool) -> [Rect; 3] {
     let input_h: u16 = if with_input { 4 } else { 0 };
-    let [header, rest] =
-        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    let [header, rest] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
     let [body, input] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(input_h)]).areas(rest);
     [header, body, input]
@@ -170,9 +169,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw("  "),
         Span::styled(
             "◈",
-            Style::default()
-                .fg(C_HDR_LOGO)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(C_HDR_LOGO).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -183,7 +180,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled("  │  ", Style::default().fg(C_HDR_SEP)),
     ];
-    let logo_w: u16 = logo_spans.iter().map(|s| s.content.chars().count() as u16).sum();
+    let logo_w: u16 = logo_spans
+        .iter()
+        .map(|s| s.content.chars().count() as u16)
+        .sum();
 
     // ── RIGHT: status pill ────────────────────────────────────────────────────
     //  idle:   "  ? help  "
@@ -197,7 +197,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
     // build center content — truncate cwd to fit
     let provider = &app.session.provider_label;
-    let model    = &app.session.agent.model;
+    let model = &app.session.agent.model;
     let cwd_full = app.session.cwd.display().to_string();
     let cwd_short = short_cwd(&cwd_full, (center_w as usize).saturating_sub(20));
 
@@ -208,7 +208,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("  │  ", Style::default().fg(C_HDR_SEP)),
         Span::styled(cwd_short, Style::default().fg(C_HDR_META)),
     ];
-    let content_w: u16 = center_content.iter().map(|s| s.content.chars().count() as u16).sum();
+    let content_w: u16 = center_content
+        .iter()
+        .map(|s| s.content.chars().count() as u16)
+        .sum();
 
     // pad center so it's truly centered
     let left_pad = center_w.saturating_sub(content_w) / 2;
@@ -217,14 +220,24 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     center_spans.extend(center_content);
 
     // ── Render logo (left) ────────────────────────────────────────────────────
-    let logo_rect = Rect { x: area.x, y: area.y, width: logo_w, height: 1 };
+    let logo_rect = Rect {
+        x: area.x,
+        y: area.y,
+        width: logo_w,
+        height: 1,
+    };
     frame.render_widget(
         Paragraph::new(Line::from(logo_spans)).style(Style::default().bg(C_HDR_BG)),
         logo_rect,
     );
 
     // ── Render center ─────────────────────────────────────────────────────────
-    let center_rect = Rect { x: center_x, y: area.y, width: center_w, height: 1 };
+    let center_rect = Rect {
+        x: center_x,
+        y: area.y,
+        width: center_w,
+        height: 1,
+    };
     frame.render_widget(
         Paragraph::new(Line::from(center_spans)).style(Style::default().bg(C_HDR_BG)),
         center_rect,
@@ -232,7 +245,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Render right pill ─────────────────────────────────────────────────────
     let right_x = area.x + w.saturating_sub(right_w);
-    let right_rect = Rect { x: right_x, y: area.y, width: right_w, height: 1 };
+    let right_rect = Rect {
+        x: right_x,
+        y: area.y,
+        width: right_w,
+        height: 1,
+    };
     frame.render_widget(
         Paragraph::new(Line::from(right_spans)).style(Style::default().bg(C_HDR_BG)),
         right_rect,
@@ -240,7 +258,11 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Row 1: separator line ─────────────────────────────────────────────────
     if area.height >= 2 {
-        let sep_row = Rect { y: area.y + 1, height: 1, ..area };
+        let sep_row = Rect {
+            y: area.y + 1,
+            height: 1,
+            ..area
+        };
         // gradient-ish: brighter under logo, dims toward right
         let sep_char = "─";
         let line = sep_char.repeat(w as usize);
@@ -257,9 +279,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
 fn build_right_pill(app: &App) -> (Vec<Span<'static>>, u16) {
     // always starts with a │ divider
-    let mut spans: Vec<Span> = vec![
-        Span::styled("  │  ", Style::default().fg(Color::Rgb(38, 44, 66))),
-    ];
+    let mut spans: Vec<Span> = vec![Span::styled(
+        "  │  ",
+        Style::default().fg(Color::Rgb(38, 44, 66)),
+    )];
 
     if app.busy {
         let sp = spinner_char(app);
@@ -309,13 +332,13 @@ fn short_cwd(cwd: &str, max_w: usize) -> String {
 fn render_body(frame: &mut Frame, area: Rect, app: &App) {
     // No box border — clean open chat area with only a bottom separator line
     // so it visually connects with the input box below.
-    frame.render_widget(
-        Block::default().style(Style::default().bg(C_SURFACE)),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(C_SURFACE)), area);
 
     // padding: 3 cols horizontal, 1 row vertical — gives breathing room
-    let padded = area.inner(Margin { horizontal: 3, vertical: 1 });
+    let padded = area.inner(Margin {
+        horizontal: 3,
+        vertical: 1,
+    });
     let inner_w = padded.width.max(1) as usize;
     let inner_h = padded.height.max(1) as usize;
 
@@ -399,7 +422,8 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     //  icons: "⊘ " (2) + " [/] " (5) + " [↵] " (5) = 12
     let inner_pad: u16 = 1;
     let icons_w: u16 = 12;
-    let text_w = inner.width
+    let text_w = inner
+        .width
         .saturating_sub(icons_w)
         .saturating_sub(inner_pad * 2);
 
@@ -415,22 +439,33 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     // ── Build text content ────────────────────────────────────────────────────
-    let (prompt_ch, prompt_col) = if app.busy { ("·", C_HINT) } else { ("❯", C_PROMPT) };
+    let (prompt_ch, prompt_col) = if app.busy {
+        ("·", C_HINT)
+    } else {
+        ("❯", C_PROMPT)
+    };
 
-    let mut spans: Vec<Span> = vec![
-        Span::styled(format!("{prompt_ch} "), Style::default().fg(prompt_col).add_modifier(Modifier::BOLD)),
-    ];
+    let mut spans: Vec<Span> = vec![Span::styled(
+        format!("{prompt_ch} "),
+        Style::default().fg(prompt_col).add_modifier(Modifier::BOLD),
+    )];
 
-    let input    = &app.input;
-    let cursor   = app.cursor;
+    let input = &app.input;
+    let cursor = app.cursor;
     let _char_len = input.chars().count();
     let show_cur = cursor_visible(app);
     // visible window: strip newlines for single-line display
-    let flat_input: String = input.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let flat_input: String = input
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
     let flat_cursor = cursor; // cursor position is same in flat view
 
     if flat_input.is_empty() {
-        spans.push(Span::styled("Ask vibectl…", Style::default().fg(C_PLACEHOLDER)));
+        spans.push(Span::styled(
+            "Ask vibectl…",
+            Style::default().fg(C_PLACEHOLDER),
+        ));
         if show_cur && !app.busy {
             spans.push(Span::styled("▋", Style::default().fg(C_CURSOR)));
         }
@@ -441,7 +476,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         let total_chars = flat_input.chars().count();
 
         // scroll right so cursor is always visible
-        let win_end   = (flat_cursor + 1).min(total_chars);
+        let win_end = (flat_cursor + 1).min(total_chars);
         let win_start = win_end.saturating_sub(avail);
 
         let visible: String = flat_input.chars().skip(win_start).take(avail).collect();
@@ -451,7 +486,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 
         let before: String = visible.chars().take(vis_cursor).collect();
         let at_char: Option<String> = visible.chars().nth(vis_cursor).map(|c| c.to_string());
-        let after:   String = visible.chars().skip(vis_cursor + 1).collect();
+        let after: String = visible.chars().skip(vis_cursor + 1).collect();
 
         if !before.is_empty() {
             spans.push(Span::styled(before, Style::default().fg(C_USER_TEXT)));
@@ -461,7 +496,10 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(visible, Style::default().fg(C_HDR_META)));
         } else if let Some(at) = at_char {
             if show_cur {
-                spans.push(Span::styled(at, Style::default().bg(C_CURSOR).fg(C_SURFACE)));
+                spans.push(Span::styled(
+                    at,
+                    Style::default().bg(C_CURSOR).fg(C_SURFACE),
+                ));
             } else {
                 spans.push(Span::styled(at, Style::default().fg(C_USER_TEXT)));
             }
@@ -493,20 +531,31 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     //  ⊘ = attachment (always dim)
     //  [/] = command palette (always dim)
     //  [↵] = send — blue bg when has text & not busy, dim otherwise
-    let has_text  = !app.input.is_empty();
+    let has_text = !app.input.is_empty();
     let send_active = has_text && !app.busy;
-    let send_bg   = if send_active { C_INPUT_ACTIVE } else { C_SURFACE3 };
-    let send_fg   = if send_active { Color::White     } else { C_BORDER  };
+    let send_bg = if send_active {
+        C_INPUT_ACTIVE
+    } else {
+        C_SURFACE3
+    };
+    let send_fg = if send_active { Color::White } else { C_BORDER };
 
     let attach_label = if !app.at_tagged.is_empty() {
         format!("@{} ", app.at_tagged.len())
     } else {
         "@ ".to_string()
     };
-    let attach_col = if !app.at_tagged.is_empty() { C_USER_MARK } else { C_HINT };
+    let attach_col = if !app.at_tagged.is_empty() {
+        C_USER_MARK
+    } else {
+        C_HINT
+    };
 
     let icon_line = Line::from(vec![
-        Span::styled(attach_label, Style::default().fg(attach_col).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            attach_label,
+            Style::default().fg(attach_col).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" [/] ", Style::default().fg(C_HINT)),
         Span::styled(
             " [↵] ",
@@ -621,7 +670,11 @@ fn render_at_dropdown(frame: &mut Frame, input_area: Rect, app: &App) {
         // Show query match highlight: bold the matched prefix
         let label = &entry.label;
         let query = &app.at_query;
-        let bg = if is_sel { Color::Rgb(30, 60, 40) } else { C_SURFACE2 };
+        let bg = if is_sel {
+            Color::Rgb(30, 60, 40)
+        } else {
+            C_SURFACE2
+        };
 
         let line = if !query.is_empty() && label.to_lowercase().contains(&query.to_lowercase()) {
             // find match position (by filename)
@@ -632,7 +685,13 @@ fn render_at_dropdown(frame: &mut Frame, input_area: Rect, app: &App) {
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(icon, Style::default().fg(icon_col).bg(bg)),
                 Span::styled(&label[..fname_start], Style::default().fg(C_HINT).bg(bg)),
-                Span::styled(&fname[..match_len], Style::default().fg(C_USER_MARK).bg(bg).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    &fname[..match_len],
+                    Style::default()
+                        .fg(C_USER_MARK)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(&fname[match_len..], Style::default().fg(label_col).bg(bg)),
             ])
         } else {
@@ -726,7 +785,9 @@ fn render_suggestions(frame: &mut Frame, input_area: Rect, app: &App) {
     frame.render_widget(block, dropdown_rect);
 
     // Build rows — max name width for alignment
-    let name_w: usize = app.suggestions.iter()
+    let name_w: usize = app
+        .suggestions
+        .iter()
         .map(|&i| COMMANDS[i].0.len())
         .max()
         .unwrap_or(8);
@@ -751,11 +812,14 @@ fn render_suggestions(frame: &mut Frame, input_area: Rect, app: &App) {
         }
 
         let name_col = if is_sel { Color::White } else { C_AGENT_MARK };
-        let desc_col = if is_sel { Color::Rgb(200, 220, 255) } else { C_HINT };
+        let desc_col = if is_sel {
+            Color::Rgb(200, 220, 255)
+        } else {
+            C_HINT
+        };
 
         // Padding: 1 space left, name left-aligned, desc right of name
-        let desc_available = (inner.width as usize)
-            .saturating_sub(name_w + 3);
+        let desc_available = (inner.width as usize).saturating_sub(name_w + 3);
         let desc_short: String = if desc.len() > desc_available {
             format!("{}…", &desc[..desc_available.saturating_sub(1)])
         } else {
@@ -849,9 +913,17 @@ fn render_approval_modal(frame: &mut Frame, app: &App) {
         )),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("  [y] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  [y] ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Allow    ", Style::default().fg(C_HDR_META)),
-            Span::styled("[n] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[n] ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Deny    ", Style::default().fg(C_HDR_META)),
             Span::styled("[Esc] ", Style::default().fg(C_HINT)),
             Span::styled("Cancel", Style::default().fg(C_HINT)),
@@ -879,7 +951,9 @@ fn help_rows() -> Vec<Line<'static>> {
                 Style::default().fg(C_AGENT_TEXT)
             } else if l.trim().is_empty() {
                 Style::default()
-            } else if trimmed.chars().all(|c| c.is_uppercase() || c == ' ' || c == '/')
+            } else if trimmed
+                .chars()
+                .all(|c| c.is_uppercase() || c == ' ' || c == '/')
                 && !trimmed.is_empty()
                 && trimmed.len() > 3
             {
@@ -968,11 +1042,7 @@ fn bubble_line(mark: Color, spans: Vec<Span<'static>>) -> Line<'static> {
     line
 }
 
-fn append_user(
-    rows: &mut Vec<Line<'static>>,
-    msg: &crate::tui::app::MessageItem,
-    width: usize,
-) {
+fn append_user(rows: &mut Vec<Line<'static>>, msg: &crate::tui::app::MessageItem, width: usize) {
     rows.push(bubble_header(C_USER_MARK, "You", &msg.ts, width));
     for line in msg.text.lines() {
         rows.push(bubble_line(
@@ -1095,9 +1165,7 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
                 ),
                 Span::styled(rest.to_string(), base.add_modifier(Modifier::ITALIC)),
             ])
-        } else if !trimmed.is_empty()
-            && trimmed.chars().all(|c| c == '-' || c == '*' || c == '=')
-        {
+        } else if !trimmed.is_empty() && trimmed.chars().all(|c| c == '-' || c == '*' || c == '=') {
             Line::from(Span::styled(
                 "─────────────────────────────────",
                 Style::default().fg(C_BORDER),
@@ -1106,10 +1174,7 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
         {
-            let mut inline = vec![Span::styled(
-                "• ",
-                Style::default().fg(C_AGENT_MARK),
-            )];
+            let mut inline = vec![Span::styled("• ", Style::default().fg(C_AGENT_MARK))];
             inline.extend(parse_inline(rest, base));
             Line::from(inline)
         } else if trimmed
@@ -1221,9 +1286,7 @@ fn parse_inline(src: &str, base: Style) -> Vec<Span<'static>> {
                 continue;
             }
         }
-        let next = rest
-            .find(|c| c == '`' || c == '*')
-            .unwrap_or(rest.len());
+        let next = rest.find(|c| c == '`' || c == '*').unwrap_or(rest.len());
         if next == 0 {
             spans.push(Span::styled(rest[..1].to_string(), base));
             rest = &rest[1..];

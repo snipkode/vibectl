@@ -191,13 +191,13 @@ fn print_report(cwd: &Path, report: &DiscoveryReport) {
 
     let root_path = report.project_root.as_deref().unwrap_or(cwd);
     let has_rust_tests = detect_rust_tests(root_path);
-    let has_ci = report
-        .ci
-        .iter()
-        .any(|e| e.status == DiscoveryStatus::Found);
+    let has_ci = report.ci.iter().any(|e| e.status == DiscoveryStatus::Found);
 
     if has_rust_tests {
-        println!("{}", ok("Rust #[test] / mod tests      found in src/".to_string()));
+        println!(
+            "{}",
+            ok("Rust #[test] / mod tests      found in src/".to_string())
+        );
     } else {
         println!(
             "{}",
@@ -207,14 +207,27 @@ fn print_report(cwd: &Path, report: &DiscoveryReport) {
 
     let has_dev_deps = detect_dev_dependencies(root_path);
     if has_dev_deps {
-        println!("{}", ok("Dev dependencies              Cargo.toml [dev-dependencies]".to_string()));
+        println!(
+            "{}",
+            ok("Dev dependencies              Cargo.toml [dev-dependencies]".to_string())
+        );
     } else {
-        println!("{}", warn("Dev dependencies              none found".to_string()));
+        println!(
+            "{}",
+            warn("Dev dependencies              none found".to_string())
+        );
     }
 
     if has_ci {
-        for e in report.ci.iter().filter(|e| e.status == DiscoveryStatus::Found) {
-            println!("{}", ok(format!("CI config                     {}", e.path)));
+        for e in report
+            .ci
+            .iter()
+            .filter(|e| e.status == DiscoveryStatus::Found)
+        {
+            println!(
+                "{}",
+                ok(format!("CI config                     {}", e.path))
+            );
         }
     } else {
         println!(
@@ -244,15 +257,19 @@ fn print_report(cwd: &Path, report: &DiscoveryReport) {
     println!();
     section("Security");
 
-    let has_security_steering = report.steering.iter().any(|e| {
-        e.status == DiscoveryStatus::Found && e.path.contains("security")
-    });
-    let has_env_example = root_path.join(".env.example").exists()
-        || root_path.join(".env.template").exists();
+    let has_security_steering = report
+        .steering
+        .iter()
+        .any(|e| e.status == DiscoveryStatus::Found && e.path.contains("security"));
+    let has_env_example =
+        root_path.join(".env.example").exists() || root_path.join(".env.template").exists();
     let has_gitignore = root_path.join(".gitignore").exists();
 
     if has_security_steering {
-        println!("{}", ok("Security steering             security.md found".to_string()));
+        println!(
+            "{}",
+            ok("Security steering             security.md found".to_string())
+        );
     } else {
         println!(
             "{}",
@@ -261,15 +278,27 @@ fn print_report(cwd: &Path, report: &DiscoveryReport) {
     }
 
     if has_env_example {
-        println!("{}", ok("Environment template          .env.example present".to_string()));
+        println!(
+            "{}",
+            ok("Environment template          .env.example present".to_string())
+        );
     } else {
-        println!("{}", warn("Environment template          .env.example not found".to_string()));
+        println!(
+            "{}",
+            warn("Environment template          .env.example not found".to_string())
+        );
     }
 
     if has_gitignore {
-        println!("{}", ok(".gitignore                    present".to_string()));
+        println!(
+            "{}",
+            ok(".gitignore                    present".to_string())
+        );
     } else {
-        println!("{}", warn(".gitignore                    not found".to_string()));
+        println!(
+            "{}",
+            warn(".gitignore                    not found".to_string())
+        );
     }
 
     // ── Unknown / Needs Verification ──────────────────────────────────────────
@@ -443,15 +472,19 @@ fn detect_root_marker(root: &Path) -> &'static str {
 fn build_unknowns(report: &DiscoveryReport, root: &Path) -> Vec<String> {
     let mut out = Vec::new();
 
-    if !report.steering.iter().any(|e| {
-        e.status == DiscoveryStatus::Found && e.path.contains("security")
-    }) {
+    if !report
+        .steering
+        .iter()
+        .any(|e| e.status == DiscoveryStatus::Found && e.path.contains("security"))
+    {
         out.push("Security requirements — no security.md steering found".into());
     }
 
-    if !report.steering.iter().any(|e| {
-        e.status == DiscoveryStatus::Found && e.path.contains("architecture")
-    }) {
+    if !report
+        .steering
+        .iter()
+        .any(|e| e.status == DiscoveryStatus::Found && e.path.contains("architecture"))
+    {
         out.push("Architecture decisions — no architecture.md steering found".into());
     }
 
@@ -463,9 +496,11 @@ fn build_unknowns(report: &DiscoveryReport, root: &Path) -> Vec<String> {
         out.push("Environment configuration — no .env.example or .env.template".into());
     }
 
-    if !report.steering.iter().any(|e| {
-        e.status == DiscoveryStatus::Found && e.path.contains("testing")
-    }) {
+    if !report
+        .steering
+        .iter()
+        .any(|e| e.status == DiscoveryStatus::Found && e.path.contains("testing"))
+    {
         out.push("Test strategy — no testing.md steering found".into());
     }
 
