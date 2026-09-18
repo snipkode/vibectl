@@ -326,6 +326,20 @@ async fn handle_key(
             app.should_quit = true;
             return Ok(());
         }
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+X — collapse multiline input to single line (join with space)
+            if app.input.contains('\n') {
+                let flat: String = app
+                    .input
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                app.cursor = flat.chars().count();
+                app.input = flat;
+            }
+        }
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.follow_bottom();
         }

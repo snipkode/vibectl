@@ -299,19 +299,28 @@ impl Agent {
         // so the LLM executes with clear step-by-step guidance.
         // Only runs on the first turn (history is empty before we push the user msg).
         let is_first_turn = self.messages.lock().unwrap().is_empty();
-        if self.auto_plan
-            && is_first_turn
-            && user_input.split_whitespace().count() >= 4
-            && Self::complexity_score(&user_input) >= Self::PLAN_THRESHOLD
-        {
+
+        // Classify intent first so we can force plan for Refactor regardless of score.
+        // Note: intent classification happens before push(user_input) so history is
+        // still empty at this point — that's intentional.
+        let user_intent = intent::classify_intent(
+            &user_input,
+            &self.model,
+            self.provider.clone(),
+        ).await;
+
+        // Force planning for Refactor intent (always) or complex tasks (heuristic).
+        let should_plan = is_first_turn && self.auto_plan && (
+            user_intent == intent::Intent::Refactor
+            || (user_input.split_whitespace().count() >= 4
+                && Self::complexity_score(&user_input) >= Self::PLAN_THRESHOLD)
+        );
+
+        if should_plan {
             match self.plan(&user_input).await {
                 Ok(plan) => {
-                    // Save to disk (best-effort).
                     let _ = crate::agent::steer::save_plan(&self.cwd, &plan);
-                    // Emit plan event so TUI / headless can display it.
                     let _ = tx.send(AgentEvent::Plan(plan.clone())).await;
-                    // Inject the plan as a system-level context message so the
-                    // agent executes step-by-step.
                     self.push(Message::system(format!(
                         "Auto-generated implementation plan for this task:\n\n{plan}\n\n\
                          Execute the steps above. Use tools to inspect, then implement."
@@ -319,7 +328,6 @@ impl Agent {
                     .await;
                 }
                 Err(e) => {
-                    // Planning failure is non-fatal — log and continue.
                     let _ = tx
                         .send(AgentEvent::Text(format!(
                             "[auto-plan failed: {e} — proceeding without plan]\n"
@@ -330,13 +338,6 @@ impl Agent {
         }
 
         self.push(Message::user(user_input.clone())).await;
-
-        // Classify intent → determines which tools are exposed to the LLM.
-        let user_intent = intent::classify_intent(
-            &user_input,
-            &self.model,
-            self.provider.clone(),
-        ).await;
 
         // Build tool list based on intent — protocol-level enforcement.
         let intent_tools = self.tools_for_intent(&user_intent);

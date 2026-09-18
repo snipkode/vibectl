@@ -11,6 +11,8 @@ pub const HELP_TEXT: &str = "\
   ────────────────────────────────────────────────
   Enter          Send message
   Shift+Enter    Insert newline
+  Ctrl+Enter     Send multiline message
+  Ctrl+X         Collapse multiline to single line
   Ctrl+C         Cancel running task / clear input
   Ctrl+D         Quit
 
