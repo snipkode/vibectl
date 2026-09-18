@@ -92,6 +92,22 @@ impl Message {
         }
     }
 
+    /// Assistant message that has both text content AND tool calls.
+    /// Some providers (OpenAI) allow this — the text is the "thinking" before calling tools.
+    pub fn assistant_tool_calls_with_text(
+        tool_calls: Vec<ToolCall>,
+        text: impl Into<String>,
+    ) -> Self {
+        let t = text.into();
+        Self {
+            role: Role::Assistant,
+            content: if t.is_empty() { None } else { Some(t) },
+            tool_call_id: None,
+            tool_calls,
+            name: None,
+        }
+    }
+
     /// Return the text content of this message for token estimation purposes.
     /// For tool-call messages, concatenates all argument strings.
     pub fn content_text(&self) -> String {

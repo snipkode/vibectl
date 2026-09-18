@@ -161,24 +161,46 @@ impl Agent {
         let mut score: u8 = 0;
 
         // Long prompts are inherently more complex.
-        if word_count > 50 { score += 3; }
-        else if word_count > 25 { score += 2; }
-        else if word_count > 15 { score += 1; }
+        if word_count > 50 {
+            score += 3;
+        } else if word_count > 25 {
+            score += 2;
+        } else if word_count > 15 {
+            score += 1;
+        }
 
         // Action verbs that imply multi-step work.
         let complex_verbs = [
-            "implement", "refactor", "migrate", "redesign", "rewrite",
-            "add feature", "create", "build", "integrate", "setup",
-            "convert", "upgrade", "extract", "split", "merge",
+            "implement",
+            "refactor",
+            "migrate",
+            "redesign",
+            "rewrite",
+            "add feature",
+            "create",
+            "build",
+            "integrate",
+            "setup",
+            "convert",
+            "upgrade",
+            "extract",
+            "split",
+            "merge",
         ];
         for verb in &complex_verbs {
-            if lower.contains(verb) { score += 2; break; }
+            if lower.contains(verb) {
+                score += 2;
+                break;
+            }
         }
 
         // Multiple targets — multi-step connectors.
         let connectors = ["and then", " and ", " then ", " also ", " plus ", " + "];
         for conn in &connectors {
-            if lower.contains(conn) { score += 1; break; }
+            if lower.contains(conn) {
+                score += 1;
+                break;
+            }
         }
 
         // File count hints — count total file-like tokens (word contains a dot + ext).
@@ -186,20 +208,30 @@ impl Agent {
             .split_whitespace()
             .filter(|w| {
                 let w = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '_');
-                let exts = [".rs", ".py", ".js", ".ts", ".go", ".toml", ".md", ".json", ".yaml"];
+                let exts = [
+                    ".rs", ".py", ".js", ".ts", ".go", ".toml", ".md", ".json", ".yaml",
+                ];
                 exts.iter().any(|e| w.ends_with(e))
             })
             .count();
-        if file_token_count >= 3 { score += 2; }
-        else if file_token_count >= 2 { score += 1; }
+        if file_token_count >= 3 {
+            score += 2;
+        } else if file_token_count >= 2 {
+            score += 1;
+        }
 
         // "all files", "every file" hints.
-        if lower.contains("all files") || lower.contains("every file") { score += 2; }
+        if lower.contains("all files") || lower.contains("every file") {
+            score += 2;
+        }
 
         // Explicit scope words.
         let scope_words = ["across", "throughout", "everywhere", "all of", "entire"];
         for w in &scope_words {
-            if lower.contains(w) { score += 1; break; }
+            if lower.contains(w) {
+                score += 1;
+                break;
+            }
         }
 
         score.min(10)
@@ -303,18 +335,15 @@ impl Agent {
         // Classify intent first so we can force plan for Refactor regardless of score.
         // Note: intent classification happens before push(user_input) so history is
         // still empty at this point — that's intentional.
-        let user_intent = intent::classify_intent(
-            &user_input,
-            &self.model,
-            self.provider.clone(),
-        ).await;
+        let user_intent =
+            intent::classify_intent(&user_input, &self.model, self.provider.clone()).await;
 
         // Force planning for Refactor intent (always) or complex tasks (heuristic).
-        let should_plan = is_first_turn && self.auto_plan && (
-            user_intent == intent::Intent::Refactor
-            || (user_input.split_whitespace().count() >= 4
-                && Self::complexity_score(&user_input) >= Self::PLAN_THRESHOLD)
-        );
+        let should_plan = is_first_turn
+            && self.auto_plan
+            && (user_intent == intent::Intent::Refactor
+                || (user_input.split_whitespace().count() >= 4
+                    && Self::complexity_score(&user_input) >= Self::PLAN_THRESHOLD));
 
         if should_plan {
             match self.plan(&user_input).await {
@@ -377,6 +406,16 @@ impl Agent {
                 }
             }
 
+            // Ensure all tool calls have a non-empty ID.
+            // Some providers (Ollama, some fine-tuned models) omit the id field.
+            // Without a stable id the tool_result message will have tool_call_id=""
+            // which many providers silently drop, breaking the conversation context.
+            for (i, slot) in tool_slots.iter_mut().enumerate() {
+                if slot.id.is_empty() {
+                    slot.id = format!("call_{run_id}_{i}");
+                }
+            }
+
             let clean_calls: Vec<ToolCall> = tool_slots
                 .into_iter()
                 .filter(|c| !c.name.is_empty())
@@ -392,8 +431,14 @@ impl Agent {
             }
 
             if !clean_calls.is_empty() {
-                self.push(Message::assistant_tool_calls(clean_calls.clone()))
-                    .await;
+                // Push assistant message that contains BOTH the streamed text (if any)
+                // AND the tool_calls. This preserves any "thinking" text in history
+                // and ensures the tool_call ids are present for tool_result matching.
+                self.push(Message::assistant_tool_calls_with_text(
+                    clean_calls.clone(),
+                    text.clone(),
+                ))
+                .await;
 
                 // ── Partition into read-only (parallel) and approval-required (serial) ──
                 //
@@ -509,17 +554,57 @@ impl Agent {
         // Name sets per intent (from lowest to highest capability).
         let allowed: &[&str] = match user_intent {
             Conversational => &[],
-            Informational  => &["read_file", "glob", "grep", "git", "list_symbols", "web_fetch"],
-            CodeWrite      => &["read_file", "glob", "grep", "git", "list_symbols",
-                                "write_file", "patch_file"],
-            Refactor       => &["read_file", "glob", "grep", "git", "list_symbols",
-                                "write_file", "patch_file"],
-            ShellExec      => &["read_file", "glob", "grep", "git", "list_symbols",
-                                "shell_exec"],
-            GitOp          => &["read_file", "glob", "grep", "git", "list_symbols",
-                                "shell_exec"],
-            Deploy         => &["read_file", "glob", "grep", "git", "list_symbols",
-                                "shell_exec", "web_fetch"],
+            Informational => &[
+                "read_file",
+                "glob",
+                "grep",
+                "git",
+                "list_symbols",
+                "web_fetch",
+            ],
+            CodeWrite => &[
+                "read_file",
+                "glob",
+                "grep",
+                "git",
+                "list_symbols",
+                "write_file",
+                "patch_file",
+            ],
+            Refactor => &[
+                "read_file",
+                "glob",
+                "grep",
+                "git",
+                "list_symbols",
+                "write_file",
+                "patch_file",
+            ],
+            ShellExec => &[
+                "read_file",
+                "glob",
+                "grep",
+                "git",
+                "list_symbols",
+                "shell_exec",
+            ],
+            GitOp => &[
+                "read_file",
+                "glob",
+                "grep",
+                "git",
+                "list_symbols",
+                "shell_exec",
+            ],
+            Deploy => &[
+                "read_file",
+                "glob",
+                "grep",
+                "git",
+                "list_symbols",
+                "shell_exec",
+                "web_fetch",
+            ],
         };
         self.tools
             .iter()
@@ -568,8 +653,8 @@ impl Agent {
         };
         let _ = already_taken; // used above
 
-        let root = crate::agent::steer::find_project_root(&self.cwd)
-            .unwrap_or_else(|| self.cwd.clone());
+        let root =
+            crate::agent::steer::find_project_root(&self.cwd).unwrap_or_else(|| self.cwd.clone());
 
         match checkpoint::create(run_id, &root) {
             Ok(stash_ref) => {
@@ -585,9 +670,7 @@ impl Agent {
                 // Only surface non-trivial errors (skip "clean tree" noise).
                 if !msg.contains("clean") {
                     let _ = tx
-                        .send(AgentEvent::Text(format!(
-                            "[checkpoint skipped: {msg}]\n"
-                        )))
+                        .send(AgentEvent::Text(format!("[checkpoint skipped: {msg}]\n")))
                         .await;
                 }
             }
@@ -929,9 +1012,8 @@ mod tests {
     #[test]
     fn complexity_refactor() {
         assert!(
-            Agent::complexity_score(
-                "refactor the entire auth module to use the new token system"
-            ) >= Agent::PLAN_THRESHOLD
+            Agent::complexity_score("refactor the entire auth module to use the new token system")
+                >= Agent::PLAN_THRESHOLD
         );
     }
 
@@ -945,9 +1027,87 @@ mod tests {
         );
     }
 
+    // ── Tool result context persistence tests ─────────────────────────────────
 
+    /// CASE 1: tool_result message is pushed with the correct matching id.
+    #[test]
+    fn tool_result_has_correct_id() {
+        use crate::llm::provider::{Message, ToolCall};
+        let call = ToolCall {
+            id: "call_abc123".into(),
+            name: "shell_exec".into(),
+            arguments: r#"{"command":"cargo build"}"#.into(),
+        };
+        let result_msg = Message::tool_result(call.id.clone(), "Compiled ok");
+        assert_eq!(result_msg.tool_call_id.as_deref(), Some("call_abc123"));
+        assert_eq!(result_msg.content.as_deref(), Some("Compiled ok"));
+    }
 
+    /// CASE 2: assistant_tool_calls_with_text preserves streamed text in history.
+    #[test]
+    fn assistant_tool_calls_preserves_text() {
+        use crate::llm::provider::{Message, ToolCall};
+        let calls = vec![ToolCall {
+            id: "call_1".into(),
+            name: "shell_exec".into(),
+            arguments: "{}".into(),
+        }];
+        let msg = Message::assistant_tool_calls_with_text(calls, "Let me run this.");
+        assert_eq!(msg.content.as_deref(), Some("Let me run this."));
+        assert_eq!(msg.tool_calls.len(), 1);
+    }
 
+    /// CASE 3: empty text produces None content, not empty string.
+    #[test]
+    fn assistant_tool_calls_empty_text_is_none() {
+        use crate::llm::provider::{Message, ToolCall};
+        let calls = vec![ToolCall {
+            id: "call_2".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }];
+        let msg = Message::assistant_tool_calls_with_text(calls, "");
+        assert!(msg.content.is_none());
+    }
 
+    /// CASE 4: fallback id generation is non-empty and stable.
+    #[test]
+    fn fallback_id_format() {
+        let run_id: u64 = 1234567890;
+        let id = format!("call_{run_id}_0");
+        assert_eq!(id, "call_1234567890_0");
+        assert!(!id.is_empty());
+    }
 
+    /// CASE 5: message history ordering — user → assistant_tool_calls → tool_result.
+    #[test]
+    fn message_history_ordering() {
+        use crate::llm::provider::{Message, Role, ToolCall};
+        let user_msg = Message::user("build the project");
+        let tool_call = ToolCall {
+            id: "c1".into(),
+            name: "shell_exec".into(),
+            arguments: "{}".into(),
+        };
+        let asst_msg = Message::assistant_tool_calls_with_text(vec![tool_call], "");
+        let res_msg = Message::tool_result("c1", "Build succeeded");
+        let history = vec![user_msg, asst_msg, res_msg];
+        assert_eq!(history[0].role, Role::User);
+        assert_eq!(history[1].role, Role::Assistant);
+        assert!(!history[1].tool_calls.is_empty());
+        assert_eq!(history[2].role, Role::Tool);
+        assert_eq!(
+            history[1].tool_calls[0].id,
+            history[2].tool_call_id.as_deref().unwrap()
+        );
+    }
+
+    /// CASE 6: error output goes into tool_result content (not discarded).
+    #[test]
+    fn tool_error_content_is_preserved() {
+        use crate::llm::provider::Message;
+        let err = "error[E0308]: mismatched types\n --> src/main.rs:5:10";
+        let msg = Message::tool_result("call_err", err);
+        assert!(msg.content.as_deref().unwrap().contains("error[E0308]"));
+    }
 }
