@@ -7,41 +7,67 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
+//
+//  Design principles:
+//  • Base background: #0f0f17 (very dark blue-black)
+//  • Surface elevated: #16161f → #1e1e2a → #252535
+//  • Text contrast: primary ≥7:1, secondary ≥4.5:1, muted ≥3:1 on base
+//  • Accent: blue-500 (#4d9de0), green-400 (#4ade80), amber-400 (#fbbf24)
+//  • All "hint" text must be ≥3:1 contrast — minimum readable gray is #6b7280
 
-const C_SURFACE: Color = Color::Rgb(18, 18, 26);
-const C_SURFACE2: Color = Color::Rgb(24, 24, 34);
-const C_BORDER: Color = Color::Rgb(48, 54, 72);
+// ── Backgrounds (darkest → lightest) ─────────────────────────────────────────
+const C_BASE:     Color = Color::Rgb(12,  12,  20 ); // terminal fill
+const C_SURFACE:  Color = Color::Rgb(16,  16,  26 ); // chat body bg
+const C_SURFACE2: Color = Color::Rgb(22,  22,  34 ); // elevated card / modal
+const C_SURFACE3: Color = Color::Rgb(30,  32,  48 ); // input box — visibly lifted
 
-const C_HDR_BG: Color = Color::Rgb(14, 14, 22);
-const C_HDR_LOGO: Color = Color::Rgb(80, 160, 240);   // brand blue
-const C_HDR_SEP: Color = Color::Rgb(40, 46, 64);
-const C_HDR_META: Color = Color::Rgb(80, 90, 120);
-const C_HDR_VAL: Color = Color::Rgb(130, 145, 185);
+// ── Borders ───────────────────────────────────────────────────────────────────
+const C_BORDER:        Color = Color::Rgb(52,  58,  82 ); // default border
+const C_BORDER_BRIGHT: Color = Color::Rgb(72,  82, 120 ); // hover / focus border
 
-const C_USER_MARK: Color = Color::Rgb(80, 205, 130);
-const C_USER_TEXT: Color = Color::Rgb(225, 232, 245);
+// ── Header ────────────────────────────────────────────────────────────────────
+const C_HDR_BG:   Color = Color::Rgb(10,  10,  18 ); // darkest strip
+const C_HDR_LOGO: Color = Color::Rgb(99, 168, 249 ); // brand blue (vibrant)
+const C_HDR_SEP:  Color = Color::Rgb(38,  44,  66 ); // separator line
+const C_HDR_VAL:  Color = Color::Rgb(158, 172, 210); // provider/model text — good contrast
+const C_HDR_META: Color = Color::Rgb(108, 118, 158); // cwd/path — readable muted
 
-const C_AGENT_MARK: Color = Color::Rgb(90, 165, 245);
-const C_AGENT_TEXT: Color = Color::Rgb(195, 218, 255);
+// ── User messages ─────────────────────────────────────────────────────────────
+const C_USER_MARK: Color = Color::Rgb(74,  222, 128); // green-400
+const C_USER_TEXT: Color = Color::Rgb(230, 236, 250); // near-white
 
-const C_TOOL_MARK: Color = Color::Rgb(195, 148, 58);
-const C_TOOL_TEXT: Color = Color::Rgb(140, 122, 72);
+// ── Agent messages ────────────────────────────────────────────────────────────
+const C_AGENT_MARK: Color = Color::Rgb(99,  168, 249); // blue-400
+const C_AGENT_TEXT: Color = Color::Rgb(205, 222, 255); // light periwinkle
 
-const C_ERROR_MARK: Color = Color::Rgb(238, 82, 82);
-const C_ERROR_TEXT: Color = Color::Rgb(255, 145, 145);
+// ── Tool calls ────────────────────────────────────────────────────────────────
+const C_TOOL_MARK: Color = Color::Rgb(251, 191,  36 ); // amber-400
+const C_TOOL_TEXT: Color = Color::Rgb(180, 160,  90 ); // readable amber-muted
 
-const C_SYS_TEXT: Color = Color::Rgb(82, 90, 118);
-const C_PLAN_MARK: Color = Color::Rgb(198, 178, 78);
-const C_PLAN_TEXT: Color = Color::Rgb(218, 198, 98);
-const C_CODE_TEXT: Color = Color::Rgb(125, 178, 125);
+// ── Errors ────────────────────────────────────────────────────────────────────
+const C_ERROR_MARK: Color = Color::Rgb(248,  90,  90 ); // red-500
+const C_ERROR_TEXT: Color = Color::Rgb(255, 160, 160 ); // light red
 
-const C_INPUT_BG: Color = Color::Rgb(20, 22, 32);
-const C_INPUT_BORDER: Color = Color::Rgb(45, 55, 80);
-const C_INPUT_ACTIVE: Color = Color::Rgb(72, 120, 195);
-const C_PROMPT: Color = Color::Rgb(80, 205, 130);
-const C_CURSOR: Color = Color::Rgb(80, 205, 130);
-const C_HINT: Color = Color::Rgb(58, 64, 88);
-const C_PLACEHOLDER: Color = Color::Rgb(68, 76, 104);
+// ── System / meta ─────────────────────────────────────────────────────────────
+const C_SYS_TEXT:  Color = Color::Rgb(110, 120, 155); // readable muted — ≥3:1
+
+// ── Plan ──────────────────────────────────────────────────────────────────────
+const C_PLAN_MARK: Color = Color::Rgb(251, 191,  36 ); // amber-400
+const C_PLAN_TEXT: Color = Color::Rgb(230, 210, 120 ); // warm yellow — readable
+
+// ── Code blocks ──────────────────────────────────────────────────────────────
+const C_CODE_TEXT: Color = Color::Rgb(134, 198, 134 ); // muted green — readable
+
+// ── Input box ─────────────────────────────────────────────────────────────────
+const C_INPUT_BORDER: Color = Color::Rgb(52,  62,  95 ); // resting border
+const C_INPUT_ACTIVE: Color = Color::Rgb(78,  130, 210); // focused / has-text border + send btn
+const C_PROMPT:       Color = Color::Rgb(74,  222, 128); // green prompt glyph
+const C_CURSOR:       Color = Color::Rgb(74,  222, 128); // green cursor
+
+// ── Hints & placeholders ──────────────────────────────────────────────────────
+//  Must be ≥3:1 on C_SURFACE (#101018) → minimum ~#6b7080
+const C_HINT:        Color = Color::Rgb(100, 110, 145); // was 58,64,88 — now readable
+const C_PLACEHOLDER: Color = Color::Rgb( 88,  96, 130); // was 68,76,104 — lifted
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -89,7 +115,7 @@ fn h_inset(r: Rect, h: u16) -> Rect {
 pub fn render(frame: &mut Frame, app: &App) {
     // fill entire background
     frame.render_widget(
-        Block::default().style(Style::default().bg(C_SURFACE)),
+        Block::default().style(Style::default().bg(C_BASE)),
         frame.area(),
     );
 
@@ -194,7 +220,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 sep_line,
-                Style::default().fg(C_HDR_SEP),
+                Style::default().fg(C_BORDER),
             )))
             .style(Style::default().bg(C_HDR_BG)),
             sep_row,
@@ -205,17 +231,15 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 // ─── Chat body ────────────────────────────────────────────────────────────────
 
 fn render_body(frame: &mut Frame, area: Rect, app: &App) {
-    // outer rounded box
-    let block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(C_BORDER))
-        .style(Style::default().bg(C_SURFACE));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    // No box border — clean open chat area with only a bottom separator line
+    // so it visually connects with the input box below.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(C_SURFACE)),
+        area,
+    );
 
-    // horizontal padding: 2 cols each side inside the box
-    let padded = inner.inner(Margin { horizontal: 2, vertical: 0 });
+    // padding: 3 cols horizontal, 1 row vertical — gives breathing room
+    let padded = area.inner(Margin { horizontal: 3, vertical: 1 });
     let inner_w = padded.width.max(1) as usize;
     let inner_h = padded.height.max(1) as usize;
 
@@ -284,7 +308,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(C_INPUT_BG));
+        .style(Style::default().bg(C_SURFACE3));
 
     let inner = block.inner(box_rect); // 1 row tall, inset by 1 each side
     frame.render_widget(block, box_rect);
@@ -374,7 +398,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(C_INPUT_BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(C_SURFACE3)),
         text_area,
     );
 
@@ -384,7 +408,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     //  [↵] = send — blue bg when has text & not busy, dim otherwise
     let has_text  = !app.input.is_empty();
     let send_active = has_text && !app.busy;
-    let send_bg   = if send_active { C_INPUT_ACTIVE } else { C_INPUT_BG };
+    let send_bg   = if send_active { C_INPUT_ACTIVE } else { C_SURFACE3 };
     let send_fg   = if send_active { Color::White     } else { C_BORDER  };
 
     let icon_line = Line::from(vec![
@@ -400,7 +424,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     ]);
 
     frame.render_widget(
-        Paragraph::new(icon_line).style(Style::default().bg(C_INPUT_BG)),
+        Paragraph::new(icon_line).style(Style::default().bg(C_SURFACE3)),
         icons_area,
     );
 
@@ -434,7 +458,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     frame.render_widget(
-        Paragraph::new(hint_line).style(Style::default().bg(C_SURFACE)),
+        Paragraph::new(hint_line).style(Style::default().bg(C_BASE)),
         hint_rect,
     );
 }
@@ -549,6 +573,10 @@ fn message_rows(app: &App, width: usize) -> Vec<Line<'static>> {
 
         if i > 0 && !same_group && !(is_tool && prev_tool) {
             rows.push(Line::raw(""));
+            // extra blank line between major turns (user↔agent) for breathing room
+            if !is_tool && !prev_tool {
+                rows.push(Line::raw(""));
+            }
         }
 
         match msg.role {
@@ -669,7 +697,7 @@ fn append_error(rows: &mut Vec<Line<'static>>, msg: &crate::tui::app::MessageIte
 fn append_system(rows: &mut Vec<Line<'static>>, msg: &crate::tui::app::MessageItem) {
     for line in msg.text.lines() {
         rows.push(Line::from(vec![
-            Span::styled("  · ", Style::default().fg(C_SYS_TEXT)),
+            Span::styled("  ─ ", Style::default().fg(C_BORDER_BRIGHT)),
             Span::styled(line.to_string(), Style::default().fg(C_SYS_TEXT)),
         ]));
     }
@@ -795,17 +823,17 @@ fn flush_code_block(buf: &mut Vec<String>, lines: &mut Vec<Line<'static>>, lang:
     };
     lines.push(Line::from(Span::styled(
         format!("╔═{label}═"),
-        Style::default().fg(C_BORDER),
+        Style::default().fg(C_BORDER_BRIGHT),
     )));
     for l in buf.drain(..) {
         lines.push(Line::from(vec![
-            Span::styled("║ ", Style::default().fg(C_BORDER)),
+            Span::styled("║ ", Style::default().fg(C_BORDER_BRIGHT)),
             Span::styled(l, Style::default().fg(C_CODE_TEXT)),
         ]));
     }
     lines.push(Line::from(Span::styled(
         "╚══════".to_string(),
-        Style::default().fg(C_BORDER),
+        Style::default().fg(C_BORDER_BRIGHT),
     )));
     lines.push(Line::raw(""));
 }
