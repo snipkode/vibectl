@@ -186,6 +186,11 @@ impl Agent {
         }
     }
 
+    /// Tools that are safe to run in parallel (read-only, no side effects).
+    fn is_readonly_tool(name: &str) -> bool {
+        matches!(name, "read_file" | "glob" | "grep" | "git" | "web_fetch")
+    }
+
     pub fn spawn_run(
         &self,
         user_input: String,
@@ -249,39 +254,103 @@ impl Agent {
             if !clean_calls.is_empty() {
                 self.push(Message::assistant_tool_calls(clean_calls.clone()))
                     .await;
-                for call in &clean_calls {
-                    let _ = tx
-                        .send(AgentEvent::ToolCall {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                        })
-                        .await;
-                    match self.execute_tool(call).await {
-                        Ok(res) => {
-                            self.push(Message::tool_result(call.id.clone(), res.content.clone()))
+
+                // ── Partition into read-only (parallel) and approval-required (serial) ──
+                //
+                // All calls in this batch are either ALL read-only or MIXED.
+                // If mixed, we run serially to preserve ordering semantics.
+                // If all read-only, run concurrently.
+                let all_readonly = clean_calls.iter().all(|c| Self::is_readonly_tool(&c.name));
+
+                if all_readonly && clean_calls.len() > 1 {
+                    // Emit ToolCall events first (ordering preserved).
+                    for call in &clean_calls {
+                        let _ = tx
+                            .send(AgentEvent::ToolCall {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                            })
+                            .await;
+                    }
+
+                    // Execute all in parallel.
+                    let futures: Vec<_> = clean_calls
+                        .iter()
+                        .map(|call| self.execute_tool(call))
+                        .collect();
+                    let results = futures::future::join_all(futures).await;
+
+                    // Push results in original order.
+                    for (call, result) in clean_calls.iter().zip(results) {
+                        match result {
+                            Ok(res) => {
+                                self.push(Message::tool_result(
+                                    call.id.clone(),
+                                    res.content.clone(),
+                                ))
                                 .await;
-                            let _ = tx
-                                .send(AgentEvent::ToolResult {
-                                    id: call.id.clone(),
-                                    name: call.name.clone(),
-                                    content: res.content,
-                                })
-                                .await;
+                                let _ = tx
+                                    .send(AgentEvent::ToolResult {
+                                        id: call.id.clone(),
+                                        name: call.name.clone(),
+                                        content: res.content,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let msg = format!("Tool error: {e}");
+                                self.push(Message::tool_result(call.id.clone(), msg.clone()))
+                                    .await;
+                                let _ = tx
+                                    .send(AgentEvent::ToolError {
+                                        id: call.id.clone(),
+                                        name: call.name.clone(),
+                                        error: msg,
+                                    })
+                                    .await;
+                            }
                         }
-                        Err(e) => {
-                            let msg = format!("Tool error: {e}");
-                            self.push(Message::tool_result(call.id.clone(), msg.clone()))
+                    }
+                } else {
+                    // Serial execution: approval tools or mixed batch.
+                    for call in &clean_calls {
+                        let _ = tx
+                            .send(AgentEvent::ToolCall {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                            })
+                            .await;
+                        match self.execute_tool(call).await {
+                            Ok(res) => {
+                                self.push(Message::tool_result(
+                                    call.id.clone(),
+                                    res.content.clone(),
+                                ))
                                 .await;
-                            let _ = tx
-                                .send(AgentEvent::ToolError {
-                                    id: call.id.clone(),
-                                    name: call.name.clone(),
-                                    error: msg,
-                                })
-                                .await;
+                                let _ = tx
+                                    .send(AgentEvent::ToolResult {
+                                        id: call.id.clone(),
+                                        name: call.name.clone(),
+                                        content: res.content,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let msg = format!("Tool error: {e}");
+                                self.push(Message::tool_result(call.id.clone(), msg.clone()))
+                                    .await;
+                                let _ = tx
+                                    .send(AgentEvent::ToolError {
+                                        id: call.id.clone(),
+                                        name: call.name.clone(),
+                                        error: msg,
+                                    })
+                                    .await;
+                            }
                         }
                     }
                 }
+
                 continue;
             }
 
@@ -342,6 +411,61 @@ impl Agent {
                 return Ok(crate::tools::ToolResult {
                     content: format!("Command rejected by user approval: {cmd}"),
                 });
+            }
+            return tool.run(&args, &self.cwd);
+        }
+
+        if name == "patch_file" {
+            let path_str = args
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let target = crate::tools::read_file::resolve_path(&self.cwd, &path_str);
+            let root = crate::agent::steer::find_project_root(&self.cwd)
+                .unwrap_or_else(|| self.cwd.clone());
+            let outside = !target.starts_with(&root);
+
+            if outside && !self.allow_any_path {
+                return Ok(crate::tools::ToolResult {
+                    content: format!(
+                        "SAFEGUARD: refusing to patch {} — outside the project root {}.",
+                        target.display(),
+                        root.display()
+                    ),
+                });
+            }
+
+            if let Some(approver) = &self.approver {
+                let patch_str = args
+                    .get("patch")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                // Show the raw patch as the diff preview — it already is a diff.
+                let preview: String = patch_str
+                    .lines()
+                    .take(40)
+                    .map(|l| format!("{l}\n"))
+                    .collect();
+                let extra_lines = patch_str.lines().count().saturating_sub(40);
+                let omit = if extra_lines > 0 {
+                    format!("  ... ({extra_lines} more lines)\n")
+                } else {
+                    String::new()
+                };
+                let mut desc = format!(
+                    "patch: {}\n{}{omit}",
+                    target.display(),
+                    preview
+                );
+                if outside {
+                    desc = format!("OUTSIDE PROJECT: {desc}");
+                }
+                if let Approval::Deny = approver.approve(desc).await {
+                    return Ok(crate::tools::ToolResult {
+                        content: format!("Patch rejected by user approval: {}", target.display()),
+                    });
+                }
             }
             return tool.run(&args, &self.cwd);
         }
@@ -560,5 +684,17 @@ mod tests {
         // All equal lines — tidak ada + atau - line (hanya spaces)
         assert!(!preview.contains("+ "));
         assert!(!preview.contains("- "));
+    }
+
+    #[test]
+    fn readonly_tool_classification() {
+        assert!(Agent::is_readonly_tool("read_file"));
+        assert!(Agent::is_readonly_tool("glob"));
+        assert!(Agent::is_readonly_tool("grep"));
+        assert!(Agent::is_readonly_tool("git"));
+        assert!(Agent::is_readonly_tool("web_fetch"));
+        assert!(!Agent::is_readonly_tool("shell_exec"));
+        assert!(!Agent::is_readonly_tool("write_file"));
+        assert!(!Agent::is_readonly_tool("patch_file"));
     }
 }

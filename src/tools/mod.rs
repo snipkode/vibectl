@@ -1,4 +1,5 @@
 pub mod git;
+pub mod patch_file;
 pub mod read_file;
 pub mod search;
 pub mod shell;
@@ -39,6 +40,7 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(git::GitTool),
         Box::new(read_file::ReadFile),
         Box::new(write_file::WriteFile),
+        Box::new(patch_file::PatchFile),
         Box::new(search::GlobFiles),
         Box::new(search::GrepFiles),
         Box::new(shell::ShellExec),
