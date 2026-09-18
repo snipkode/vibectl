@@ -111,6 +111,17 @@ impl MessageItem {
     }
 }
 
+/// Entry in the @ file dropdown.
+#[derive(Debug, Clone)]
+pub struct AtEntry {
+    /// Display label (relative path)
+    pub label: String,
+    /// Absolute path
+    pub path: std::path::PathBuf,
+    /// true = directory
+    pub is_dir: bool,
+}
+
 /// All slash commands with their description and usage hint.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/help",     "Toggle help panel",               "/help"),
@@ -151,6 +162,16 @@ pub struct App {
     pub suggestion_sel: usize,
     /// Whether suggestion dropdown is visible
     pub suggestion_visible: bool,
+    /// Files/dirs matching current @ query
+    pub at_files: Vec<AtEntry>,
+    /// Selected index in at_files
+    pub at_sel: usize,
+    /// Whether @ file dropdown is visible
+    pub at_visible: bool,
+    /// The @ query being typed (chars after @ up to cursor)
+    pub at_query: String,
+    /// Tagged file paths that will be injected into the next prompt
+    pub at_tagged: Vec<std::path::PathBuf>,
 }
 
 impl App {
@@ -183,6 +204,11 @@ impl App {
             suggestions: vec![],
             suggestion_sel: 0,
             suggestion_visible: false,
+            at_files: vec![],
+            at_sel: 0,
+            at_visible: false,
+            at_query: String::new(),
+            at_tagged: vec![],
         }
     }
 
@@ -242,6 +268,100 @@ impl App {
         self.suggestion_visible = false;
         self.suggestions.clear();
         true
+    }
+
+    /// Called when '@' is typed — scan files and show dropdown.
+    pub fn trigger_at(&mut self) {
+        self.at_query.clear();
+        self.at_files = scan_at_files(&self.session.cwd, "");
+        self.at_sel = 0;
+        self.at_visible = !self.at_files.is_empty();
+    }
+
+    /// Update @ dropdown as user types after '@'.
+    pub fn update_at(&mut self, query: &str) {
+        self.at_query = query.to_string();
+        self.at_files = scan_at_files(&self.session.cwd, query);
+        self.at_sel = 0;
+        self.at_visible = !self.at_files.is_empty();
+    }
+
+    pub fn at_prev(&mut self) {
+        if self.at_files.is_empty() { return; }
+        if self.at_sel == 0 { self.at_sel = self.at_files.len() - 1; }
+        else { self.at_sel -= 1; }
+    }
+
+    pub fn at_next(&mut self) {
+        if self.at_files.is_empty() { return; }
+        self.at_sel = (self.at_sel + 1) % self.at_files.len();
+    }
+
+    /// Complete the @ mention with selected file path.
+    pub fn complete_at(&mut self) {
+        if !self.at_visible || self.at_files.is_empty() { return; }
+        let entry = self.at_files[self.at_sel].clone();
+        // Find the @ position in input and replace query with label
+        let at_pos = self.find_at_pos();
+        if let Some(pos) = at_pos {
+            let before: String = self.input.chars().take(pos).collect();
+            let after: String = self.input.chars().skip(pos + 1 + self.at_query.chars().count()).collect();
+            let trail = if entry.is_dir { "/" } else { " " };
+            self.input = format!("{before}@{}{trail}{after}", entry.label);
+            self.cursor = before.chars().count() + 1 + entry.label.chars().count() + 1;
+            // Tag the file for context injection
+            if !entry.is_dir {
+                if !self.at_tagged.iter().any(|p| p == &entry.path) {
+                    self.at_tagged.push(entry.path);
+                }
+            }
+        }
+        self.at_visible = false;
+        self.at_files.clear();
+        self.at_query.clear();
+    }
+
+    pub fn hide_at(&mut self) {
+        self.at_visible = false;
+        self.at_files.clear();
+        self.at_query.clear();
+    }
+
+    /// Find the position (char index) of the active @ trigger in input.
+    fn find_at_pos(&self) -> Option<usize> {
+        let chars: Vec<char> = self.input.chars().collect();
+        // Search backward from cursor
+        let end = self.cursor.min(chars.len());
+        for i in (0..end).rev() {
+            if chars[i] == '@' { return Some(i); }
+            if chars[i] == ' ' || chars[i] == '\n' { break; }
+        }
+        None
+    }
+
+    /// Build the prompt with tagged file contents appended.
+    pub fn build_prompt_with_context(&self, prompt: &str) -> String {
+        if self.at_tagged.is_empty() {
+            return prompt.to_string();
+        }
+        let mut result = prompt.to_string();
+        result.push_str("\n\n---\nAttached file context:\n");
+        for path in &self.at_tagged {
+            let label = path.strip_prefix(&self.session.cwd)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| path.display().to_string());
+            result.push_str(&format!("\n### {}\n", label));
+            match std::fs::read_to_string(path) {
+                Ok(contents) => {
+                    result.push_str("```\n");
+                    result.push_str(&contents);
+                    if !contents.ends_with('\n') { result.push('\n'); }
+                    result.push_str("```\n");
+                }
+                Err(e) => result.push_str(&format!("(error reading file: {e})\n")),
+            }
+        }
+        result
     }
 
     pub fn hide_suggestions(&mut self) {
@@ -432,7 +552,55 @@ impl App {
     }
 }
 
-// ─── Char/byte index helpers ──────────────────────────────────────────────────
+// ─── @ file mention helpers ──────────────────────────────────────────────────
+
+/// Scan cwd for files/dirs matching a query prefix.
+/// Returns up to 20 results, dirs first, sorted.
+pub fn scan_at_files(cwd: &std::path::Path, query: &str) -> Vec<AtEntry> {
+    use std::fs;
+
+    let query_lower = query.to_lowercase();
+    // Determine base dir and filename prefix
+    let (base_dir, name_prefix) = if query.contains('/') || query.contains(std::path::MAIN_SEPARATOR) {
+        let p = std::path::Path::new(query);
+        let parent = p.parent().unwrap_or(std::path::Path::new("."));
+        let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        (cwd.join(parent), name.to_string())
+    } else {
+        (cwd.to_path_buf(), query_lower.clone())
+    };
+
+    let Ok(entries) = fs::read_dir(&base_dir) else {
+        return vec![];
+    };
+
+    let mut results: Vec<AtEntry> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_string_lossy().to_lowercase();
+            // skip hidden and target/
+            if name.starts_with('.') { return None; }
+            if name == "target" { return None; }
+            if !name.starts_with(&name_prefix) { return None; }
+            let is_dir = path.is_dir();
+            // relative label from cwd
+            let label = path.strip_prefix(cwd)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| path.display().to_string());
+            Some(AtEntry { label, path, is_dir })
+        })
+        .collect();
+
+    // Dirs first, then files, both sorted
+    results.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then(a.label.cmp(&b.label))
+    });
+    results.truncate(20);
+    results
+}
+
+/// ─── Char/byte index helpers ──────────────────────────────────────────────────
 
 fn char_count(s: &str) -> usize {
     s.chars().count()

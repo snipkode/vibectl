@@ -196,7 +196,10 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Esc => {
-            if app.suggestion_visible {
+            if app.at_visible {
+                app.hide_at();
+                return Ok(());
+            } else if app.suggestion_visible {
                 app.hide_suggestions();
                 return Ok(());
             } else if app.show_help {
@@ -216,13 +219,14 @@ async fn handle_key(
             }
         }
         KeyCode::Tab => {
-            // Tab completes the highlighted suggestion
-            if app.suggestion_visible {
-                app.complete_suggestion();
-            }
+            if app.at_visible { app.complete_at(); }
+            else if app.suggestion_visible { app.complete_suggestion(); }
         }
         KeyCode::Enter => {
-            // Enter on suggestion = complete, not send
+            if app.at_visible {
+                app.complete_at();
+                return Ok(());
+            }
             if app.suggestion_visible {
                 app.complete_suggestion();
                 return Ok(());
@@ -243,9 +247,11 @@ async fn handle_key(
                     if text.starts_with('/') {
                         handle_command(msg_tx, app, &text).await;
                     } else {
+                        let prompt = app.build_prompt_with_context(&text);
+                        app.at_tagged.clear();
                         app.push_user(text.clone());
                         app.begin_run();
-                        spawn_agent(msg_tx.clone(), app, text);
+                        spawn_agent(msg_tx.clone(), app, prompt);
                     }
                 }
                 return Ok(());
@@ -262,9 +268,11 @@ async fn handle_key(
                 handle_command(msg_tx, app, &text).await;
                 return Ok(());
             }
+            let prompt = app.build_prompt_with_context(&text);
+            app.at_tagged.clear(); // consumed
             app.push_user(text.clone());
             app.begin_run();
-            spawn_agent(msg_tx.clone(), app, text);
+            spawn_agent(msg_tx.clone(), app, prompt);
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.busy {
@@ -316,18 +324,14 @@ async fn handle_key(
             app.show_help = !app.show_help;
         }
         KeyCode::Up => {
-            if app.suggestion_visible {
-                app.suggestion_prev();
-            } else {
-                app.history_prev();
-            }
+            if app.at_visible { app.at_prev(); }
+            else if app.suggestion_visible { app.suggestion_prev(); }
+            else { app.history_prev(); }
         }
         KeyCode::Down => {
-            if app.suggestion_visible {
-                app.suggestion_next();
-            } else {
-                app.history_next();
-            }
+            if app.at_visible { app.at_next(); }
+            else if app.suggestion_visible { app.suggestion_next(); }
+            else { app.history_next(); }
         }
         KeyCode::Left => app.move_left(),
         KeyCode::Right => app.move_right(),
@@ -336,7 +340,15 @@ async fn handle_key(
         KeyCode::Backspace => {
             app.ctrl_c_count = 0;
             app.backspace();
-            app.update_suggestions();
+            if app.at_visible {
+                if let Some(q) = extract_at_query(&app.input, app.cursor) {
+                    app.update_at(&q);
+                } else {
+                    app.hide_at();
+                }
+            } else {
+                app.update_suggestions();
+            }
         }
         KeyCode::Delete => {
             app.ctrl_c_count = 0;
@@ -347,8 +359,28 @@ async fn handle_key(
         KeyCode::PageDown => app.scroll_down(10),
         KeyCode::Char(c) => {
             app.ctrl_c_count = 0;
-            app.insert_char(c);
-            app.update_suggestions();
+            if c == '@' && !app.busy {
+                app.insert_char(c);
+                app.trigger_at();
+                // hide / command suggestions
+                app.hide_suggestions();
+            } else if app.at_visible {
+                // user is typing the @ query
+                if c == ' ' || c == '\n' {
+                    // space/newline finalizes the @ mention without completing
+                    app.hide_at();
+                    app.insert_char(c);
+                } else {
+                    app.insert_char(c);
+                    // update query: chars after the last @ up to cursor
+                    if let Some(q) = extract_at_query(&app.input, app.cursor) {
+                        app.update_at(&q);
+                    }
+                }
+            } else {
+                app.insert_char(c);
+                app.update_suggestions();
+            }
         }
         _ => {}
     }
@@ -488,4 +520,21 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
             }
         }
     });
+}
+
+/// Extract the @ query from input: chars after the last '@' before the cursor.
+/// Returns None if there is no active @ trigger.
+fn extract_at_query(input: &str, cursor: usize) -> Option<String> {
+    let chars: Vec<char> = input.chars().collect();
+    let end = cursor.min(chars.len());
+    for i in (0..end).rev() {
+        if chars[i] == '@' {
+            let q: String = chars[i + 1..end].iter().collect();
+            return Some(q);
+        }
+        if chars[i] == ' ' || chars[i] == '\n' {
+            return None;
+        }
+    }
+    None
 }

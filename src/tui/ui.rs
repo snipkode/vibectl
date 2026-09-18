@@ -131,8 +131,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_header(frame, header, app);
     render_body(frame, body, app);
     render_input(frame, input, app);
-    // Dropdown rendered last so it floats above input box
-    if app.suggestion_visible {
+    // Dropdowns rendered last so they float above input box
+    if app.at_visible {
+        render_at_dropdown(frame, input, app);
+    } else if app.suggestion_visible {
         render_suggestions(frame, input, app);
     }
 }
@@ -496,8 +498,15 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let send_bg   = if send_active { C_INPUT_ACTIVE } else { C_SURFACE3 };
     let send_fg   = if send_active { Color::White     } else { C_BORDER  };
 
+    let attach_label = if !app.at_tagged.is_empty() {
+        format!("@{} ", app.at_tagged.len())
+    } else {
+        "@ ".to_string()
+    };
+    let attach_col = if !app.at_tagged.is_empty() { C_USER_MARK } else { C_HINT };
+
     let icon_line = Line::from(vec![
-        Span::styled("⊘ ", Style::default().fg(C_HINT)),
+        Span::styled(attach_label, Style::default().fg(attach_col).add_modifier(Modifier::BOLD)),
         Span::styled(" [/] ", Style::default().fg(C_HINT)),
         Span::styled(
             " [↵] ",
@@ -547,6 +556,126 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         hint_rect,
     );
 }
+// ─── @ file dropdown ─────────────────────────────────────────────────────────
+//
+//  ╭──────────────────────────────────╮
+//  │ 📁 src/                          │
+//  │ 📄 src/main.rs         ← sel     │
+//  │ 📄 src/lib.rs                    │
+//  ╰──────────────────────────────────╯
+
+fn render_at_dropdown(frame: &mut Frame, input_area: Rect, app: &App) {
+    if app.at_files.is_empty() {
+        return;
+    }
+
+    let margin: u16 = 2;
+    let max_visible: usize = 8;
+    let count = app.at_files.len().min(max_visible);
+    let dropdown_h = count as u16 + 2;
+
+    if input_area.y < dropdown_h {
+        return;
+    }
+
+    let dropdown_w = input_area.width.saturating_sub(margin * 2);
+    let dropdown_rect = Rect {
+        x: input_area.x + margin,
+        y: input_area.y.saturating_sub(dropdown_h),
+        width: dropdown_w,
+        height: dropdown_h,
+    };
+
+    frame.render_widget(Clear, dropdown_rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(C_USER_MARK))
+        .style(Style::default().bg(C_SURFACE2));
+
+    let inner = block.inner(dropdown_rect);
+    frame.render_widget(block, dropdown_rect);
+
+    for (row, entry) in app.at_files.iter().take(max_visible).enumerate() {
+        let is_sel = row == app.at_sel;
+
+        let row_rect = Rect {
+            x: inner.x,
+            y: inner.y + row as u16,
+            width: inner.width,
+            height: 1,
+        };
+
+        if is_sel {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(Color::Rgb(30, 60, 40))),
+                row_rect,
+            );
+        }
+
+        let icon = if entry.is_dir { "▸ " } else { "  " };
+        let icon_col = if entry.is_dir { C_AGENT_MARK } else { C_HINT };
+        let label_col = if is_sel { Color::White } else { C_USER_TEXT };
+
+        // Show query match highlight: bold the matched prefix
+        let label = &entry.label;
+        let query = &app.at_query;
+        let bg = if is_sel { Color::Rgb(30, 60, 40) } else { C_SURFACE2 };
+
+        let line = if !query.is_empty() && label.to_lowercase().contains(&query.to_lowercase()) {
+            // find match position (by filename)
+            let fname_start = label.rfind('/').map(|i| i + 1).unwrap_or(0);
+            let fname = &label[fname_start..];
+            let match_len = query.len().min(fname.len());
+            Line::from(vec![
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(icon, Style::default().fg(icon_col).bg(bg)),
+                Span::styled(&label[..fname_start], Style::default().fg(C_HINT).bg(bg)),
+                Span::styled(&fname[..match_len], Style::default().fg(C_USER_MARK).bg(bg).add_modifier(Modifier::BOLD)),
+                Span::styled(&fname[match_len..], Style::default().fg(label_col).bg(bg)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(" ", Style::default().bg(bg)),
+                Span::styled(icon, Style::default().fg(icon_col).bg(bg)),
+                Span::styled(label.clone(), Style::default().fg(label_col).bg(bg)),
+            ])
+        };
+
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(bg)),
+            row_rect,
+        );
+    }
+
+    // Footer hint
+    let total = app.at_files.len();
+    if total > max_visible || !app.at_tagged.is_empty() {
+        // show just below the visible items — but we're inside inner so no extra row
+        // instead show in title area via block title
+    }
+    // show hint at top border: "@ path/query  N files"
+    let query_hint = if app.at_query.is_empty() {
+        format!(" @ {} files ", total.min(max_visible))
+    } else {
+        format!(" @{} — {} ", app.at_query, total)
+    };
+    let hint_rect = Rect {
+        x: dropdown_rect.x + 2,
+        y: dropdown_rect.y,
+        width: (query_hint.len() as u16).min(dropdown_rect.width.saturating_sub(4)),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            query_hint,
+            Style::default().fg(C_USER_MARK).bg(C_SURFACE2),
+        )),
+        hint_rect,
+    );
+}
+
 // ─── Command suggestion dropdown ─────────────────────────────────────────────
 //
 //  Floats just above the input box:
