@@ -29,15 +29,17 @@ pub enum Msg {
 }
 
 pub enum AppMsg {
-    Text(String),
-    ToolStart(String),
+    /// run_id tags each event so stale events after interrupt are dropped.
+    Text(u64, String),
+    ToolStart(u64, String),
     ToolResult {
+        run_id: u64,
         name: String,
         content: String,
         ok: bool,
     },
-    Done,
-    Error(String),
+    Done(u64),
+    Error(u64, String),
     Plan(String),
     ApprovalRequested(String, oneshot::Sender<bool>),
 }
@@ -131,13 +133,23 @@ async fn run_loop(
 
 async fn handle_app_msg(app: &mut App, msg: AppMsg) {
     match msg {
-        AppMsg::Text(t) => app.stream_text(&t),
-        AppMsg::ToolStart(name) => app.tool_start(name),
-        AppMsg::ToolResult { name, content, ok } => app.tool_end(name, ok, content),
-        AppMsg::Done => app.finish_run(None),
-        AppMsg::Error(e) => {
-            app.finish_run(None);
-            app.push_error(e);
+        AppMsg::Text(id, t) => {
+            if id == app.run_id { app.stream_text(&t); }
+        }
+        AppMsg::ToolStart(id, name) => {
+            if id == app.run_id { app.tool_start(name); }
+        }
+        AppMsg::ToolResult { run_id, name, content, ok } => {
+            if run_id == app.run_id { app.tool_end(name, ok, content); }
+        }
+        AppMsg::Done(id) => {
+            if id == app.run_id { app.finish_run(None); }
+        }
+        AppMsg::Error(id, e) => {
+            if id == app.run_id {
+                app.finish_run(None);
+                app.push_error(e);
+            }
         }
         AppMsg::Plan(p) => {
             app.finish_run(None);
@@ -219,10 +231,36 @@ async fn handle_key(
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.busy {
+                // cancel running agent
                 app.interrupt();
+                // reset exit counter
+                app.ctrl_c_count = 0;
             } else {
-                app.input.clear();
-                app.cursor = 0;
+                if !app.input.is_empty() {
+                    // first Ctrl+C: clear input
+                    app.input.clear();
+                    app.cursor = 0;
+                    app.ctrl_c_count = 0;
+                } else {
+                    // input already empty — count toward exit
+                    // timeout: if last press was > 50 frames ago (~4s), reset
+                    let elapsed = app.frame.saturating_sub(app.ctrl_c_frame);
+                    if elapsed > 50 {
+                        app.ctrl_c_count = 0;
+                    }
+                    app.ctrl_c_count += 1;
+                    app.ctrl_c_frame = app.frame;
+
+                    if app.ctrl_c_count >= 2 {
+                        // second Ctrl+C — exit
+                        std::process::exit(0);
+                    } else {
+                        // first press — show hint
+                        app.push_system(
+                            "Press Ctrl+C again to exit  (or /quit)".to_string(),
+                        );
+                    }
+                }
             }
         }
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -231,18 +269,28 @@ async fn handle_key(
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.follow_bottom();
         }
-        KeyCode::Char('?') => app.show_help = !app.show_help,
+        KeyCode::Char('?') => {
+            app.ctrl_c_count = 0;
+            app.show_help = !app.show_help;
+        }
         KeyCode::Up => app.history_prev(),
         KeyCode::Down => app.history_next(),
         KeyCode::Left => app.move_left(),
         KeyCode::Right => app.move_right(),
         KeyCode::Home => app.move_home(),
         KeyCode::End => app.move_end(),
-        KeyCode::Backspace => app.backspace(),
-        KeyCode::Delete => app.delete_at_cursor(),
+        KeyCode::Backspace => {
+            app.ctrl_c_count = 0;
+            app.backspace();
+        }
+        KeyCode::Delete => {
+            app.ctrl_c_count = 0;
+            app.delete_at_cursor();
+        }
         KeyCode::PageUp => app.scroll_up(10),
         KeyCode::PageDown => app.scroll_down(10),
         KeyCode::Char(c) => {
+            app.ctrl_c_count = 0;
             app.insert_char(c);
         }
         _ => {}
@@ -304,6 +352,7 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
             let plan_tx = msg_tx.clone();
             let task = rest.clone();
             let cwd = app.session.cwd.clone();
+            let plan_run_id = app.run_id;
             let handle = tokio::spawn(async move {
                 let result = agent.plan(&task).await;
                 match result {
@@ -312,7 +361,7 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
                         let _ = plan_tx.send(Msg::App(AppMsg::Plan(plan))).await;
                     }
                     Err(e) => {
-                        let _ = plan_tx.send(Msg::App(AppMsg::Error(e.to_string()))).await;
+                        let _ = plan_tx.send(Msg::App(AppMsg::Error(plan_run_id, e.to_string()))).await;
                     }
                 }
             });
@@ -354,24 +403,28 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
 fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
     let agent = app.session.agent.clone();
     let (mut stream, handle) = agent.spawn_run(prompt);
+    // capture the run_id at the moment of spawn — stale events will be filtered
+    let run_id = app.run_id;
     app.run_handle = Some(handle);
     tokio::spawn(async move {
         while let Some(ev) = stream.recv().await {
             let msg = match ev {
-                AgentEvent::Text(t) => AppMsg::Text(t),
-                AgentEvent::ToolCall { id: _, name } => AppMsg::ToolStart(name),
+                AgentEvent::Text(t) => AppMsg::Text(run_id, t),
+                AgentEvent::ToolCall { id: _, name } => AppMsg::ToolStart(run_id, name),
                 AgentEvent::ToolResult { name, content, .. } => AppMsg::ToolResult {
+                    run_id,
                     name,
                     content,
                     ok: true,
                 },
                 AgentEvent::ToolError { name, error, .. } => AppMsg::ToolResult {
+                    run_id,
                     name,
                     content: error,
                     ok: false,
                 },
-                AgentEvent::Done { .. } => AppMsg::Done,
-                AgentEvent::Error(e) => AppMsg::Error(e),
+                AgentEvent::Done { .. } => AppMsg::Done(run_id),
+                AgentEvent::Error(e) => AppMsg::Error(run_id, e),
             };
             if msg_tx.send(Msg::App(msg)).await.is_err() {
                 break;

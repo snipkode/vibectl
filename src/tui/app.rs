@@ -1,39 +1,52 @@
 use crate::session::Session;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 pub const HELP_TEXT: &str = "\
-Controls
-════════
-Enter            Send / follow stream to bottom
-Shift+Enter      Newline
-↑/↓              History navigation
-PgUp/PgDn, wheel Scroll through conversation
-Ctrl+C           Cancel running task / clear input
-Ctrl+D           Exit
-Ctrl+L           Jump to latest message
-Esc              Close help / cancel
-? or /help       Toggle this help
+  vibectl — keyboard reference
+  ════════════════════════════════════════════════
 
-Confirmations
-═══════════════
-File writes and shell commands pause for your approval:
-[y]es / [n]o (Esc = cancel). Writes outside the project
-root are refused.
+  Sending
+  ────────────────────────────────────────────────
+  Enter          Send message
+  Shift+Enter    Insert newline
+  Ctrl+C         Cancel running task / clear input
+  Ctrl+D         Quit
 
-Slash commands
-══════════════
-/model <name>    Switch model (e.g. /model gpt-4o-mini)
-/plan <task>     Generate a step-by-step plan first
-/steer <text>    Append a rule to .vibectl/steer.md
-/new             Reset conversation history
-/spec            Show the current spec plan
-/cfg             Print effective config
-/provider        Show current provider + model
-/clear           Clear the message view
+  Navigation
+  ────────────────────────────────────────────────
+  ↑ / ↓          Input history
+  PgUp / PgDn    Scroll conversation
+  Scroll wheel   Scroll conversation
+  Ctrl+L         Jump to latest message
+  Esc            Close help / cancel
 
-Everything else is sent to the agent as a prompt.
+  Slash commands
+  ────────────────────────────────────────────────
+  /model <name>  Switch model  e.g. /model gpt-4o
+  /plan <task>   Generate a step-by-step plan
+  /steer <text>  Append a rule to .vibectl/steer.md
+  /new           Reset conversation history
+  /spec          Show current plan
+  /cfg           Print effective config
+  /provider      Show provider + model info
+  /clear         Clear the message view
+  /help or ?     Toggle this help
+
+  Shell commands and file writes pause for approval.
+  Writes outside the project root are refused.
 ";
+
+/// Wall-clock minutes since midnight, as HH:MM.
+pub fn now_hhmm() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mins = (secs % 86400) / 60;
+    format!("{:02}:{:02}", mins / 60, mins % 60)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MsgRole {
@@ -49,50 +62,51 @@ pub enum MsgRole {
 pub struct MessageItem {
     pub role: MsgRole,
     pub text: String,
+    /// Tool name or plan title
     pub kind: Option<String>,
+    /// Whether the tool call succeeded
+    pub ok: bool,
+    /// HH:MM timestamp
+    pub ts: String,
 }
 
 impl MessageItem {
-    pub fn user(text: String) -> Self {
+    fn new(role: MsgRole, text: String) -> Self {
         Self {
-            role: MsgRole::User,
+            role,
             text,
             kind: None,
+            ok: true,
+            ts: now_hhmm(),
         }
+    }
+
+    pub fn user(text: String) -> Self {
+        Self::new(MsgRole::User, text)
     }
     pub fn assistant(text: String) -> Self {
-        Self {
-            role: MsgRole::Assistant,
-            text,
-            kind: None,
-        }
+        Self::new(MsgRole::Assistant, text)
     }
     pub fn system(text: String) -> Self {
-        Self {
-            role: MsgRole::System,
-            text,
-            kind: None,
-        }
+        Self::new(MsgRole::System, text)
     }
     pub fn error(text: String) -> Self {
         Self {
-            role: MsgRole::Error,
-            text,
-            kind: None,
+            ok: false,
+            ..Self::new(MsgRole::Error, text)
         }
     }
-    pub fn tool(kind: String, text: String) -> Self {
+    pub fn tool(kind: String, text: String, ok: bool) -> Self {
         Self {
-            role: MsgRole::Tool,
-            text,
             kind: Some(kind),
+            ok,
+            ..Self::new(MsgRole::Tool, text)
         }
     }
     pub fn plan(text: String) -> Self {
         Self {
-            role: MsgRole::Plan,
-            text,
-            kind: None,
+            kind: Some("Plan".into()),
+            ..Self::new(MsgRole::Plan, text)
         }
     }
 }
@@ -114,15 +128,25 @@ pub struct App {
     pub last_status: String,
     pub pending_approval: Option<String>,
     pub pending_approval_tx: Option<oneshot::Sender<bool>>,
+    /// How many consecutive Ctrl+C presses while idle (resets on any other key)
+    pub ctrl_c_count: u8,
+    /// frame at which the last idle Ctrl+C was pressed (for timeout)
+    pub ctrl_c_frame: u64,
+    /// Monotonically increasing run ID — incremented each begin_run().
+    /// Events arriving with a stale ID are silently dropped after interrupt.
+    pub run_id: u64,
 }
 
 impl App {
     pub fn new(session: Session) -> Self {
+        let welcome = format!(
+            "vibectl  {}  {}",
+            session.provider_label,
+            session.agent.model
+        );
         Self {
             session,
-            messages: vec![MessageItem::system(
-                "vibectl — vibe coding agent. Type /help for commands.".to_string(),
-            )],
+            messages: vec![MessageItem::system(welcome)],
             input: String::new(),
             cursor: 0,
             history: vec![],
@@ -137,12 +161,16 @@ impl App {
             last_status: String::new(),
             pending_approval: None,
             pending_approval_tx: None,
+            ctrl_c_count: 0,
+            ctrl_c_frame: 0,
+            run_id: 0,
         }
     }
 
-    pub fn model_line(&self) -> String {
+    #[allow(dead_code)]
+    pub fn status_line(&self) -> String {
         format!(
-            "vibectl | {} | {} model | cwd: {}",
+            " {} │ {} │ {}",
             self.session.provider_label,
             self.session.agent.model,
             self.session.cwd.display()
@@ -150,20 +178,24 @@ impl App {
     }
 
     pub fn insert_char(&mut self, c: char) {
-        self.input.insert(self.cursor, c);
+        // handle multi-byte correctly
+        let byte_pos = char_to_byte(&self.input, self.cursor);
+        self.input.insert(byte_pos, c);
         self.cursor += 1;
     }
 
     pub fn backspace(&mut self) {
         if self.cursor > 0 && !self.input.is_empty() {
-            self.input.remove(self.cursor - 1);
+            let byte_pos = char_to_byte(&self.input, self.cursor - 1);
+            self.input.remove(byte_pos);
             self.cursor -= 1;
         }
     }
 
     pub fn delete_at_cursor(&mut self) {
-        if self.cursor < self.input.len() && !self.input.is_empty() {
-            self.input.remove(self.cursor);
+        if self.cursor < char_count(&self.input) {
+            let byte_pos = char_to_byte(&self.input, self.cursor);
+            self.input.remove(byte_pos);
         }
     }
 
@@ -172,7 +204,7 @@ impl App {
     }
 
     pub fn move_right(&mut self) {
-        if self.cursor < self.input.len() {
+        if self.cursor < char_count(&self.input) {
             self.cursor += 1;
         }
     }
@@ -182,7 +214,7 @@ impl App {
     }
 
     pub fn move_end(&mut self) {
-        self.cursor = self.input.len();
+        self.cursor = char_count(&self.input);
     }
 
     pub fn history_prev(&mut self) {
@@ -195,7 +227,7 @@ impl App {
         };
         self.history_pos = Some(pos);
         self.input = self.history[pos].clone();
-        self.cursor = self.input.len();
+        self.cursor = char_count(&self.input);
     }
 
     pub fn history_next(&mut self) {
@@ -211,7 +243,7 @@ impl App {
             }
             None => {}
         }
-        self.cursor = self.input.len();
+        self.cursor = char_count(&self.input);
     }
 
     pub fn submit(&mut self) -> String {
@@ -245,8 +277,8 @@ impl App {
         self.messages.push(MessageItem::error(text));
     }
 
-    pub fn push_tool(&mut self, kind: String, text: String) {
-        self.messages.push(MessageItem::tool(kind, text));
+    pub fn push_tool(&mut self, kind: String, text: String, ok: bool) {
+        self.messages.push(MessageItem::tool(kind, text, ok));
     }
 
     pub fn push_plan(&mut self, text: String) {
@@ -254,6 +286,7 @@ impl App {
     }
 
     pub fn begin_run(&mut self) {
+        self.run_id = self.run_id.wrapping_add(1);
         self.busy = true;
         self.running_tool = None;
         self.active_assistant = None;
@@ -261,11 +294,11 @@ impl App {
     }
 
     pub fn stream_text(&mut self, delta: &str) {
-        if let Some(i) = self.active_assistant
-            && i < self.messages.len()
-        {
-            self.messages[i].text.push_str(delta);
-            return;
+        if let Some(i) = self.active_assistant {
+            if i < self.messages.len() {
+                self.messages[i].text.push_str(delta);
+                return;
+            }
         }
         self.messages
             .push(MessageItem::assistant(delta.to_string()));
@@ -278,8 +311,7 @@ impl App {
 
     pub fn tool_end(&mut self, name: String, ok: bool, content: String) {
         self.running_tool = None;
-        let status = if ok { "ok" } else { "failed" };
-        self.push_tool(format!("{name} ({status})"), content);
+        self.push_tool(name, content, ok);
     }
 
     pub fn finish_run(&mut self, status: Option<String>) {
@@ -298,8 +330,10 @@ impl App {
         if let Some(h) = self.run_handle.take() {
             h.abort();
         }
+        // bump run_id — any in-flight events from the aborted task will be dropped
+        self.run_id = self.run_id.wrapping_add(1);
         self.finish_run(None);
-        self.push_system("interrupted".to_string());
+        self.push_system("⚡ interrupted".to_string());
     }
 
     pub fn scroll_up(&mut self, lines: usize) {
@@ -313,4 +347,17 @@ impl App {
     pub fn follow_bottom(&mut self) {
         self.scroll_offset = 0;
     }
+}
+
+// ─── Char/byte index helpers ──────────────────────────────────────────────────
+
+fn char_count(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
 }
