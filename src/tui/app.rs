@@ -175,6 +175,8 @@ pub struct App {
     pub at_query: String,
     /// Tagged file paths that will be injected into the next prompt
     pub at_tagged: Vec<std::path::PathBuf>,
+    /// Set to true to trigger graceful exit after terminal cleanup.
+    pub should_quit: bool,
 }
 
 impl App {
@@ -212,6 +214,7 @@ impl App {
             at_visible: false,
             at_query: String::new(),
             at_tagged: vec![],
+            should_quit: false,
         }
     }
 

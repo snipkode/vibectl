@@ -42,6 +42,9 @@ pub enum AppMsg {
     Error(u64, String),
     Plan(String),
     ApprovalRequested(String, oneshot::Sender<bool>),
+    /// Graceful exit — cleanup terminal then quit.
+    #[allow(dead_code)]
+    Quit,
 }
 
 pub struct TuiApprover {
@@ -88,23 +91,26 @@ pub async fn run(session: Session) -> Result<()> {
     crossterm::terminal::enable_raw_mode()?;
 
     let mut terminal = Terminal::new(ResilientBackend::new())?;
-    terminal.clear()?;
 
     crossterm::execute!(
         io::stdout(),
+        crossterm::terminal::EnterAlternateScreen,
         crossterm::cursor::Hide,
         event::EnableMouseCapture
     )?;
 
+    terminal.clear()?;
+
     let res = run_loop(&mut terminal, &msg_tx, &mut msg_rx, &mut app).await;
 
+    // Always restore terminal state, even if run_loop returned an error.
     let _ = crossterm::terminal::disable_raw_mode();
-    crossterm::execute!(
+    let _ = crossterm::execute!(
         io::stdout(),
+        event::DisableMouseCapture,
         crossterm::cursor::Show,
-        event::DisableMouseCapture
-    )?;
-    terminal.clear()?;
+        crossterm::terminal::LeaveAlternateScreen,
+    );
     res
 }
 
@@ -127,6 +133,10 @@ async fn run_loop(
             Msg::Key(key) => handle_key(terminal, msg_tx, app, key).await?,
             Msg::Mouse(m) => handle_mouse(app, m),
             Msg::App(m) => handle_app_msg(app, m).await,
+        }
+
+        if app.should_quit {
+            return Ok(());
         }
     }
 }
@@ -158,6 +168,9 @@ async fn handle_app_msg(app: &mut App, msg: AppMsg) {
         AppMsg::ApprovalRequested(cmd, otx) => {
             app.pending_approval = Some(cmd);
             app.pending_approval_tx = Some(otx);
+        }
+        AppMsg::Quit => {
+            app.should_quit = true;
         }
     }
 }
@@ -297,8 +310,9 @@ async fn handle_key(
                     app.ctrl_c_frame = app.frame;
 
                     if app.ctrl_c_count >= 2 {
-                        // second Ctrl+C — exit
-                        std::process::exit(0);
+                        // second Ctrl+C — graceful exit
+                        app.should_quit = true;
+                        return Ok(());
                     } else {
                         // first press — show hint
                         app.push_system(
@@ -309,7 +323,8 @@ async fn handle_key(
             }
         }
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            std::process::exit(0);
+            app.should_quit = true;
+            return Ok(());
         }
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.follow_bottom();
@@ -395,7 +410,9 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
 
     match name.as_str() {
         "/help" | "/?" => app.show_help = !app.show_help,
-        "/quit" | "/exit" => std::process::exit(0),
+        "/quit" | "/exit" => {
+            app.should_quit = true;
+        }
         "/clear" => {
             app.messages.clear();
             app.follow_bottom();
