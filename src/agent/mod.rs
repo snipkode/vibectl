@@ -434,6 +434,15 @@ impl Agent {
                 .filter(|c| !c.name.is_empty())
                 .collect();
 
+            // Safety guard: if the input was classified as conversational but
+            // the model still emitted tool calls (e.g. older fine-tuned model),
+            // discard them and treat the response as a plain text reply.
+            if conversational && !clean_calls.is_empty() {
+                self.push(Message::assistant(text)).await;
+                let _ = tx.send(AgentEvent::Done { finish_reason }).await;
+                break;
+            }
+
             if !clean_calls.is_empty() {
                 self.push(Message::assistant_tool_calls(clean_calls.clone()))
                     .await;
