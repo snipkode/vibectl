@@ -59,10 +59,12 @@ fn cursor_visible(app: &App) -> bool {
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 
-/// Split the screen into [header, body, input].
-/// header = 2 rows (logo + separator), input = 5 rows (padded box), body = rest.
+/// Screen split:
+///   header  = 2 rows  (logo bar + separator line)
+///   input   = 4 rows  (╭─╮ border box 3 rows + 1 hint line)
+///   body    = rest
 fn main_areas(area: Rect, with_input: bool) -> [Rect; 3] {
-    let input_h: u16 = if with_input { 5 } else { 0 };
+    let input_h: u16 = if with_input { 4 } else { 0 };
     let [header, rest] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
     let [body, input] =
@@ -71,6 +73,7 @@ fn main_areas(area: Rect, with_input: bool) -> [Rect; 3] {
 }
 
 /// Inset a rect by `h` columns on each side, clamped.
+#[allow(dead_code)]
 fn h_inset(r: Rect, h: u16) -> Rect {
     let pad = h.min(r.width / 2);
     Rect {
@@ -236,192 +239,205 @@ fn render_body(frame: &mut Frame, area: Rect, app: &App) {
 // ─── Input box ────────────────────────────────────────────────────────────────
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    // ── outer box: 2-col margin each side, full height (5 rows) ─────────────
+    // ── Pixel-accurate reference layout ──────────────────────────────────────
     //
-    //  ╭────────────────────────────────────────────────────────────────────╮
-    //  │                                                                    │  ← blank top
-    //  │  ❯  Message vibectl…▋                          Shift+↵ newline    │  ← input row
-    //  │                                                  Enter ↵  send    │  ← hint row
-    //  ╰────────────────────────────────────────────────────────────────────╯
+    //  area = 4 rows, full terminal width
     //
-    let outer = h_inset(area, 2);
+    //  row 0: ╭──────────────────────────────────────────────────────────────╮
+    //  row 1: │  ❯  Ask vibectl...▋                        ⊘   [/]   [↵]  │
+    //  row 2: ╰──────────────────────────────────────────────────────────────╯
+    //  row 3:    /help  ·  Ctrl+K  ·  ↑↓  history
+    //
+    //  The box spans rows 0-2 (3 rows).
+    //  Hint bar is row 3, same x as box content.
+    //  Horizontal margin: 2 cols each side from terminal edge.
 
-    let border_color = if app.busy { C_INPUT_BORDER } else { C_INPUT_ACTIVE };
-    let bg_color = C_INPUT_BG;
+    if area.height < 4 || area.width < 20 {
+        return;
+    }
 
+    let margin: u16 = 2;
+    let box_rect = Rect {
+        x: area.x + margin,
+        y: area.y,
+        width: area.width.saturating_sub(margin * 2),
+        height: 3,
+    };
+    let hint_rect = Rect {
+        x: area.x + margin,
+        y: area.y + 3,
+        width: area.width.saturating_sub(margin * 2),
+        height: 1,
+    };
+
+    // ── Border color: dim when idle/empty, bright when typing, muted when busy
+    let border_color = if app.busy {
+        C_INPUT_BORDER
+    } else if app.input.is_empty() {
+        C_INPUT_BORDER
+    } else {
+        C_INPUT_ACTIVE
+    };
+
+    // Draw the rounded box
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(bg_color));
+        .style(Style::default().bg(C_INPUT_BG));
 
-    let inner = block.inner(outer);
-    frame.render_widget(block, outer);
+    let inner = block.inner(box_rect); // 1 row tall, inset by 1 each side
+    frame.render_widget(block, box_rect);
 
-    // inner has 3 rows:  row 0 = blank, row 1 = text input, row 2 = hint bar
-    if inner.height < 2 {
+    if inner.width < 12 {
         return;
     }
 
-    let input_row = Rect { y: inner.y + 1, height: 1, ..inner };
-    let hint_row  = Rect { y: inner.y + 2, height: 1, ..inner };
+    // ── Split inner row into: [text_area] [icons_area] ────────────────────────
+    //
+    //  icons:  "⊘ " (2) + " [/] " (5) + " [↵]" (4) = 11 chars + 1 pad = 12
+    //  We reserve 12 cols for icons on the right.
+    let icons_w: u16 = 12;
+    let text_w   = inner.width.saturating_sub(icons_w);
 
-    // ── horizontal padding inside box ────────────────────────────────────────
-    let pad: u16 = 2;
-    let text_area = Rect {
-        x: inner.x + pad,
-        width: inner.width.saturating_sub(pad * 2),
-        ..input_row
-    };
-    let hint_area = Rect {
-        x: inner.x + pad,
-        width: inner.width.saturating_sub(pad * 2),
-        ..hint_row
-    };
+    let text_area  = Rect { width: text_w,   ..inner };
+    let icons_area = Rect { x: inner.x + text_w, width: icons_w, ..inner };
 
-    if text_area.width < 4 {
-        return;
-    }
+    // ── Build text content ────────────────────────────────────────────────────
+    let (prompt_ch, prompt_col) = if app.busy { ("·", C_HINT) } else { ("❯", C_PROMPT) };
 
-    // ── build input line ─────────────────────────────────────────────────────
-    let (prompt_char, prompt_color) = if app.busy {
-        ("·", C_HINT)
-    } else {
-        ("❯", C_PROMPT)
-    };
-
-    let mut spans: Vec<Span> = vec![Span::styled(
-        format!("{prompt_char} "),
-        Style::default()
-            .fg(prompt_color)
-            .add_modifier(Modifier::BOLD),
-    )];
+    let mut spans: Vec<Span> = vec![
+        Span::styled(format!("{prompt_ch} "), Style::default().fg(prompt_col).add_modifier(Modifier::BOLD)),
+    ];
 
     let input    = &app.input;
     let cursor   = app.cursor;
-    let char_len = input.chars().count();
+    let _char_len = input.chars().count();
     let show_cur = cursor_visible(app);
+    // visible window: strip newlines for single-line display
+    let flat_input: String = input.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+    let flat_cursor = cursor; // cursor position is same in flat view
 
-    if input.is_empty() {
-        spans.push(Span::styled(
-            "Message vibectl…",
-            Style::default().fg(C_PLACEHOLDER),
-        ));
+    if flat_input.is_empty() {
+        spans.push(Span::styled("Ask vibectl…", Style::default().fg(C_PLACEHOLDER)));
         if show_cur && !app.busy {
-            spans.push(Span::styled(
-                "▋",
-                Style::default().fg(C_CURSOR),
-            ));
+            spans.push(Span::styled("▋", Style::default().fg(C_CURSOR)));
         }
     } else {
-        let before: String = input.chars().take(cursor).collect();
+        // viewport scroll: only show chars that fit
+        let prompt_w: usize = 2; // "❯ "
+        let avail = (text_w as usize).saturating_sub(prompt_w);
+        let total_chars = flat_input.chars().count();
+
+        // scroll right so cursor is always visible
+        let win_end   = (flat_cursor + 1).min(total_chars);
+        let win_start = win_end.saturating_sub(avail);
+
+        let visible: String = flat_input.chars().skip(win_start).take(avail).collect();
+        let vis_cursor = flat_cursor.saturating_sub(win_start); // cursor in visible window
+
+        let _vis_len = visible.chars().count();
+
+        let before: String = visible.chars().take(vis_cursor).collect();
+        let at_char: Option<String> = visible.chars().nth(vis_cursor).map(|c| c.to_string());
+        let after:   String = visible.chars().skip(vis_cursor + 1).collect();
+
         if !before.is_empty() {
             spans.push(Span::styled(before, Style::default().fg(C_USER_TEXT)));
         }
 
         if app.busy {
-            let rest: String = input.chars().skip(cursor).collect();
-            if !rest.is_empty() {
-                spans.push(Span::styled(rest, Style::default().fg(C_HDR_META)));
-            }
-        } else if cursor < char_len {
-            let at: String = input.chars().nth(cursor).unwrap().to_string();
+            spans.push(Span::styled(visible, Style::default().fg(C_HDR_META)));
+        } else if let Some(at) = at_char {
             if show_cur {
-                spans.push(Span::styled(
-                    at,
-                    Style::default().bg(C_CURSOR).fg(C_SURFACE),
-                ));
+                spans.push(Span::styled(at, Style::default().bg(C_CURSOR).fg(C_SURFACE)));
             } else {
                 spans.push(Span::styled(at, Style::default().fg(C_USER_TEXT)));
             }
-            let after: String = input.chars().skip(cursor + 1).collect();
             if !after.is_empty() {
                 spans.push(Span::styled(after, Style::default().fg(C_USER_TEXT)));
             }
-        } else if show_cur {
-            spans.push(Span::styled("▋", Style::default().fg(C_CURSOR)));
+        } else {
+            // cursor past end
+            if show_cur {
+                spans.push(Span::styled("▋", Style::default().fg(C_CURSOR)));
+            }
         }
-    }
 
-    // ── right badge: char count OR spinner, right-aligned inside box ─────────
-    let badge: Option<Vec<Span>> = if app.busy {
-        Some(vec![
-            Span::styled(
-                format!("{} ", spinner_char(app)),
-                Style::default().fg(C_TOOL_MARK),
-            ),
-        ])
-    } else if char_len > 0 {
-        Some(vec![Span::styled(
-            format!("{char_len} ch "),
-            Style::default().fg(C_HINT).add_modifier(Modifier::DIM),
-        )])
-    } else {
-        None
-    };
-
-    if let Some(badge_spans) = badge {
-        let text_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        let badge_w: usize = badge_spans.iter().map(|s| s.content.chars().count()).sum();
-        let avail = text_area.width as usize;
-        if text_w + badge_w + 1 <= avail {
-            let gap = avail.saturating_sub(text_w + badge_w);
-            spans.push(Span::raw(" ".repeat(gap)));
-            spans.extend(badge_spans);
+        // show "…" prefix if scrolled
+        if win_start > 0 {
+            if let Some(first) = spans.get_mut(1) {
+                let content = format!("…{}", first.content);
+                first.content = content.into();
+            }
         }
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(bg_color)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(C_INPUT_BG)),
         text_area,
     );
 
-    // ── hint bar (row below input) ────────────────────────────────────────────
-    //  left:   /help for commands  OR  working…
-    //  right:  Shift+↵ newline · Enter ↵ send  OR  Ctrl+C cancel
-    let (hint_left_str, hint_right_pieces): (&str, &[(&str, Color)]) = if app.busy {
-        (
-            "  working…",
-            &[
-                ("Ctrl+C ", C_ERROR_MARK),
-                ("cancel  ", C_HINT),
-            ],
-        )
-    } else {
-        (
-            "  /help for commands",
-            &[
-                ("Shift+↵ ", C_HDR_META),
-                ("newline  ·  ", C_HINT),
-                ("Enter ↵ ", C_AGENT_MARK),
-                ("send  ", C_HINT),
-            ],
-        )
-    };
+    // ── Action icons: ⊘   [/]   [↵] ─────────────────────────────────────────
+    //  ⊘ = attachment (always dim)
+    //  [/] = command palette (always dim)
+    //  [↵] = send — blue bg when has text & not busy, dim otherwise
+    let has_text  = !app.input.is_empty();
+    let send_active = has_text && !app.busy;
+    let send_bg   = if send_active { C_INPUT_ACTIVE } else { C_INPUT_BG };
+    let send_fg   = if send_active { Color::White     } else { C_BORDER  };
 
-    let right_w: usize = hint_right_pieces.iter().map(|(s, _)| s.chars().count()).sum();
-    let left_w  = hint_left_str.chars().count();
-    let avail   = hint_area.width as usize;
-
-    let mut hint_spans = vec![Span::styled(
-        hint_left_str.to_string(),
-        Style::default().fg(if app.busy { C_TOOL_MARK } else { C_HINT }),
-    )];
-
-    if left_w + right_w < avail {
-        let gap = avail.saturating_sub(left_w + right_w);
-        hint_spans.push(Span::raw(" ".repeat(gap)));
-        for (text, color) in hint_right_pieces {
-            hint_spans.push(Span::styled(text.to_string(), Style::default().fg(*color)));
-        }
-    }
+    let icon_line = Line::from(vec![
+        Span::styled("⊘ ", Style::default().fg(C_HINT)),
+        Span::styled(" [/] ", Style::default().fg(C_HINT)),
+        Span::styled(
+            " [↵] ",
+            Style::default()
+                .fg(send_fg)
+                .bg(send_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
 
     frame.render_widget(
-        Paragraph::new(Line::from(hint_spans)).style(Style::default().bg(bg_color)),
-        hint_area,
+        Paragraph::new(icon_line).style(Style::default().bg(C_INPUT_BG)),
+        icons_area,
+    );
+
+    // ── Hint bar (row 3, outside box) ─────────────────────────────────────────
+    let hint_line: Line = if app.busy {
+        Line::from(vec![
+            Span::styled(
+                format!("  {} working… ", spinner_char(app)),
+                Style::default().fg(C_TOOL_MARK),
+            ),
+            Span::styled("Ctrl+C ", Style::default().fg(C_ERROR_MARK)),
+            Span::styled("to cancel", Style::default().fg(C_HINT)),
+        ])
+    } else if app.input.chars().any(|c| c == '\n') {
+        // multiline state
+        Line::from(vec![
+            Span::styled("  Ctrl+Enter ", Style::default().fg(C_AGENT_MARK)),
+            Span::styled("to send  ·  ", Style::default().fg(C_HINT)),
+            Span::styled("Enter ", Style::default().fg(C_HINT)),
+            Span::styled("newline", Style::default().fg(C_HINT)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  /help", Style::default().fg(C_HINT)),
+            Span::styled("  ·  ", Style::default().fg(C_BORDER)),
+            Span::styled("Ctrl+K", Style::default().fg(C_HINT)),
+            Span::styled("  ·  ", Style::default().fg(C_BORDER)),
+            Span::styled("↑↓", Style::default().fg(C_HINT)),
+            Span::styled("  history", Style::default().fg(C_HINT)),
+        ])
+    };
+
+    frame.render_widget(
+        Paragraph::new(hint_line).style(Style::default().bg(C_SURFACE)),
+        hint_rect,
     );
 }
-
 // ─── Approval modal ───────────────────────────────────────────────────────────
 
 fn render_approval_modal(frame: &mut Frame, app: &App) {

@@ -213,6 +213,20 @@ async fn handle_key(
                 }
                 return Ok(());
             }
+            // Ctrl+Enter — force send even in multiline mode
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                let text = app.submit();
+                if !text.trim().is_empty() {
+                    if text.starts_with('/') {
+                        handle_command(msg_tx, app, &text).await;
+                    } else {
+                        app.push_user(text.clone());
+                        app.begin_run();
+                        spawn_agent(msg_tx.clone(), app, text);
+                    }
+                }
+                return Ok(());
+            }
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 app.insert_char('\n');
                 return Ok(());
@@ -268,6 +282,11 @@ async fn handle_key(
         }
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.follow_bottom();
+        }
+        // Ctrl+K — toggle help (shown in hint bar)
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.ctrl_c_count = 0;
+            app.show_help = !app.show_help;
         }
         KeyCode::Char('?') => {
             app.ctrl_c_count = 0;
