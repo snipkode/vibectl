@@ -12,6 +12,8 @@ pub struct Config {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub allow_any_path: bool,
     #[serde(flatten)]
     pub providers: ProviderConfig,
 }
@@ -23,6 +25,7 @@ impl Default for Config {
             temperature: 0.2,
             max_tokens: Some(4096),
             system_prompt: None,
+            allow_any_path: false,
             providers: ProviderConfig::default(),
         }
     }

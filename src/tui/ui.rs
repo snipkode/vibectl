@@ -6,6 +6,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+fn spinner(app: &App) -> char {
+    SPINNER[(app.frame as usize) % SPINNER.len()]
+}
+
 pub fn render(frame: &mut Frame, app: &App) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -20,10 +26,12 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let mut status = if let Some(tool) = &app.running_tool {
-        format!(" ⟳ running: {tool}")
-    } else if app.busy {
-        " ⟳ working…".to_string()
+    let mut status = if app.busy {
+        let sp = spinner(app);
+        match &app.running_tool {
+            Some(tool) => format!(" {sp} running: {tool}"),
+            None => format!(" {sp} working…"),
+        }
     } else {
         String::new()
     };
@@ -62,7 +70,10 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     }
     let cursor_vis = if app.busy { '·' } else { '█' };
     let indicator = if app.busy {
-        Span::styled("⟳", Style::default().fg(Color::Magenta))
+        Span::styled(
+            spinner(app).to_string(),
+            Style::default().fg(Color::Magenta),
+        )
     } else {
         Span::styled("❯", Style::default().fg(Color::Green))
     };

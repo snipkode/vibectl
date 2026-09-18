@@ -15,10 +15,10 @@ struct HeadlessApprover {
 impl Approver for HeadlessApprover {
     async fn approve(&self, description: String) -> Approval {
         if self.allow {
-            println!("[shell] $ {description}");
+            println!("[approved] {description}");
             Approval::Allow
         } else {
-            eprintln!("[vibectl] refusing shell command without --dangerous-yes: $ {description}");
+            eprintln!("[vibectl] refusing action without --dangerous-yes: {description}");
             Approval::Deny
         }
     }
@@ -47,6 +47,7 @@ pub async fn run(args: &Cli) -> Result<()> {
     session.agent.approver = Some(std::sync::Arc::new(HeadlessApprover {
         allow: args.dangerous_yes,
     }));
+    session.agent.allow_any_path = args.dangerous_yes;
 
     if args.plan {
         println!("[plan] generating plan…");
@@ -57,7 +58,7 @@ pub async fn run(args: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    let mut stream = session.agent.run(prompt).await?;
+    let mut stream = session.agent.spawn_run(prompt).0;
     let mut had_error = false;
     while let Some(ev) = stream.recv().await {
         match ev {

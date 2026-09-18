@@ -121,7 +121,7 @@ async fn run_loop(
             .unwrap_or(Msg::Tick);
 
         match msg {
-            Msg::Tick => {}
+            Msg::Tick => app.frame = app.frame.wrapping_add(1),
             Msg::Key(key) => handle_key(terminal, msg_tx, app, key).await?,
             Msg::Mouse(m) => handle_mouse(app, m),
             Msg::App(m) => handle_app_msg(app, m).await,
@@ -194,6 +194,11 @@ async fn handle_key(
         KeyCode::Enter => {
             if app.busy {
                 app.follow_bottom();
+                let typed = app.input.clone();
+                if typed.trim_start().starts_with('/') {
+                    let text = app.submit();
+                    handle_command(msg_tx, app, &text).await;
+                }
                 return Ok(());
             }
             if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -214,7 +219,7 @@ async fn handle_key(
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.busy {
-                app.finish_run(None);
+                app.interrupt();
             } else {
                 app.input.clear();
                 app.cursor = 0;
@@ -237,7 +242,7 @@ async fn handle_key(
         KeyCode::Delete => app.delete_at_cursor(),
         KeyCode::PageUp => app.scroll_up(10),
         KeyCode::PageDown => app.scroll_down(10),
-        KeyCode::Char(c) if !app.busy => {
+        KeyCode::Char(c) => {
             app.insert_char(c);
         }
         _ => {}
@@ -299,7 +304,7 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
             let plan_tx = msg_tx.clone();
             let task = rest.clone();
             let cwd = app.session.cwd.clone();
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let result = agent.plan(&task).await;
                 match result {
                     Ok(plan) => {
@@ -311,6 +316,7 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
                     }
                 }
             });
+            app.run_handle = Some(handle);
         }
         "/spec" => {
             let plan = crate::agent::steer::read_plan(&app.session.cwd).unwrap_or(None);
@@ -347,15 +353,9 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
 
 fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
     let agent = app.session.agent.clone();
+    let (mut stream, handle) = agent.spawn_run(prompt);
+    app.run_handle = Some(handle);
     tokio::spawn(async move {
-        let stream = match agent.run(prompt).await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = msg_tx.send(Msg::App(AppMsg::Error(e.to_string()))).await;
-                return;
-            }
-        };
-        let mut stream = stream;
         while let Some(ev) = stream.recv().await {
             let msg = match ev {
                 AgentEvent::Text(t) => AppMsg::Text(t),

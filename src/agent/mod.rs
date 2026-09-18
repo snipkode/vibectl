@@ -54,6 +54,7 @@ pub struct Agent {
     pub tools: Vec<ToolDef>,
     pub cwd: PathBuf,
     pub approver: Option<Arc<dyn Approver>>,
+    pub allow_any_path: bool,
     messages: Arc<Mutex<Vec<Message>>>,
 }
 
@@ -75,6 +76,7 @@ impl Agent {
             tools,
             cwd,
             approver: None,
+            allow_any_path: false,
             messages: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -156,15 +158,18 @@ impl Agent {
         }
     }
 
-    pub async fn run(&self, user_input: String) -> Result<mpsc::Receiver<AgentEvent>> {
+    pub fn spawn_run(
+        &self,
+        user_input: String,
+    ) -> (mpsc::Receiver<AgentEvent>, tokio::task::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel(256);
         let this = self.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = this.run_inner(tx.clone(), user_input).await {
                 let _ = tx.send(AgentEvent::Error(e.to_string())).await;
             }
         });
-        Ok(rx)
+        (rx, handle)
     }
 
     async fn run_inner(&self, tx: mpsc::Sender<AgentEvent>, user_input: String) -> Result<()> {
@@ -260,22 +265,6 @@ impl Agent {
 
     async fn execute_tool(&self, call: &ToolCall) -> Result<crate::tools::ToolResult> {
         let name = call.name.clone();
-        if name == "shell_exec"
-            && let Some(approver) = &self.approver
-        {
-            let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap_or_default();
-            let cmd = args
-                .get("command")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let cmd_snapshot = cmd.clone();
-            if let Approval::Deny = approver.approve(cmd).await {
-                return Ok(crate::tools::ToolResult {
-                    content: format!("Command rejected by user approval: {cmd_snapshot}"),
-                });
-            }
-        }
         let tool_impls = crate::tools::all_tools();
         let tool = tool_impls
             .iter()
@@ -283,6 +272,72 @@ impl Agent {
             .with_context(|| format!("unknown tool: {name}"))?;
         let args: serde_json::Value = serde_json::from_str(&call.arguments)
             .with_context(|| format!("invalid args for tool {name}: {}", call.arguments))?;
+
+        if name == "shell_exec" {
+            let cmd = args
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(approver) = &self.approver
+                && let Approval::Deny = approver.approve(format!("$ {cmd}")).await
+            {
+                return Ok(crate::tools::ToolResult {
+                    content: format!("Command rejected by user approval: {cmd}"),
+                });
+            }
+            return tool.run(&args, &self.cwd);
+        }
+
+        if name == "write_file" {
+            let path_str = args
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let target = crate::tools::read_file::resolve_path(&self.cwd, &path_str);
+            let root = crate::agent::steer::find_project_root(&self.cwd)
+                .unwrap_or_else(|| self.cwd.clone());
+            let outside = !target.starts_with(&root);
+
+            if outside && !self.allow_any_path {
+                return Ok(crate::tools::ToolResult {
+                    content: format!(
+                        "SAFEGUARD: refusing to write {} — outside the project root {}. \
+                         Writes are confined to the project. Override in config with allow_any_path: true.",
+                        target.display(),
+                        root.display()
+                    ),
+                });
+            }
+
+            if let Some(approver) = &self.approver {
+                let bytes = args
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::len)
+                    .unwrap_or(0);
+                let op = if target.exists() { "update" } else { "create" };
+                let mut desc = format!("{op}: {} ({} bytes)", target.display(), bytes);
+                if outside {
+                    desc = format!("OUTSIDE PROJECT: {desc}");
+                }
+                if crate::agent::steer::read_plan(&self.cwd)
+                    .ok()
+                    .flatten()
+                    .is_none()
+                {
+                    desc = format!("[no plan — run /plan <task> first] {desc}");
+                }
+                if let Approval::Deny = approver.approve(desc).await {
+                    return Ok(crate::tools::ToolResult {
+                        content: format!("Write rejected by user approval: {}", target.display()),
+                    });
+                }
+            }
+            return tool.run(&args, &self.cwd);
+        }
+
         tool.run(&args, &self.cwd)
     }
 }

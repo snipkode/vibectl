@@ -1,5 +1,6 @@
 use crate::session::Session;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 pub const HELP_TEXT: &str = "\
 Controls
@@ -13,6 +14,12 @@ Ctrl+D           Exit
 Ctrl+L           Jump to latest message
 Esc              Close help / cancel
 ? or /help       Toggle this help
+
+Confirmations
+═══════════════
+File writes and shell commands pause for your approval:
+[y]es / [n]o (Esc = cancel). Writes outside the project
+root are refused.
 
 Slash commands
 ══════════════
@@ -100,6 +107,8 @@ pub struct App {
     pub busy: bool,
     pub show_help: bool,
     pub scroll_offset: usize,
+    pub frame: u64,
+    pub run_handle: Option<JoinHandle<()>>,
     pub running_tool: Option<String>,
     pub active_assistant: Option<usize>,
     pub last_status: String,
@@ -121,6 +130,8 @@ impl App {
             busy: false,
             show_help: false,
             scroll_offset: 0,
+            frame: 0,
+            run_handle: None,
             running_tool: None,
             active_assistant: None,
             last_status: String::new(),
@@ -276,9 +287,19 @@ impl App {
         self.running_tool = None;
         self.active_assistant = None;
         self.pending_approval = None;
+        self.pending_approval_tx = None;
+        self.run_handle = None;
         if let Some(s) = status {
             self.last_status = s;
         }
+    }
+
+    pub fn interrupt(&mut self) {
+        if let Some(h) = self.run_handle.take() {
+            h.abort();
+        }
+        self.finish_run(None);
+        self.push_system("interrupted".to_string());
     }
 
     pub fn scroll_up(&mut self, lines: usize) {

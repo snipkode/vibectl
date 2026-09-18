@@ -33,6 +33,7 @@ impl Session {
             cfg.temperature = project_cfg.temperature;
             cfg.max_tokens = project_cfg.max_tokens;
             cfg.system_prompt = project_cfg.system_prompt.or(cfg.system_prompt);
+            cfg.allow_any_path = cfg.allow_any_path || project_cfg.allow_any_path;
             cfg.providers.openai_api_key = project_cfg
                 .providers
                 .openai_api_key
@@ -54,13 +55,14 @@ impl Session {
         let label = provider_name(&cfg.providers, &model);
 
         let steering = steer::load_steering(&cwd);
-        let agent = Agent::new(
+        let mut agent = Agent::new(
             model.clone(),
             steering.content,
             provider,
             &crate::tools::all_tools(),
             cwd.clone(),
         );
+        agent.allow_any_path = cfg.allow_any_path;
 
         Ok(Self {
             cwd,

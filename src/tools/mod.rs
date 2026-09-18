@@ -2,6 +2,7 @@ pub mod git;
 pub mod read_file;
 pub mod search;
 pub mod shell;
+pub mod web;
 pub mod write_file;
 
 use anyhow::Result;
@@ -41,5 +42,6 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(search::GlobFiles),
         Box::new(search::GrepFiles),
         Box::new(shell::ShellExec),
+        Box::new(web::WebFetch),
     ]
 }
