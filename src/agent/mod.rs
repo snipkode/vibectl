@@ -4,6 +4,7 @@ use crate::tools::{Tool, ToolDef};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
+use similar::{ChangeTag, TextDiff};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -52,6 +53,8 @@ pub struct Agent {
     pub system: String,
     pub provider: Arc<dyn Provider>,
     pub tools: Vec<ToolDef>,
+    /// Cached tool implementations — avoids re-constructing on every tool call.
+    pub tool_impls: Arc<Vec<Box<dyn Tool>>>,
     pub cwd: PathBuf,
     pub approver: Option<Arc<dyn Approver>>,
     pub allow_any_path: bool,
@@ -63,7 +66,7 @@ impl Agent {
         model: String,
         system: String,
         provider: Arc<dyn Provider>,
-        tool_impls: &[Box<dyn Tool>],
+        tool_impls: Vec<Box<dyn Tool>>,
         cwd: PathBuf,
     ) -> Self {
         let tools = tool_impls.iter().map(|t| t.def()).collect();
@@ -74,6 +77,7 @@ impl Agent {
             system,
             provider,
             tools,
+            tool_impls: Arc::new(tool_impls),
             cwd,
             approver: None,
             allow_any_path: false,
@@ -89,18 +93,42 @@ impl Agent {
         self.messages.lock().unwrap().push(msg);
     }
 
-    async fn trim_history(&self, keep_last: usize) {
-        // Keep history bounded: drop oldest user/assistant turns beyond a cap.
+    /// Estimate token count for a string (rough: 1 token ≈ 4 chars).
+    fn estimate_tokens(s: &str) -> usize {
+        (s.len() + 3) / 4
+    }
+
+    /// Estimate token count for a single message (role + content).
+    fn message_tokens(msg: &Message) -> usize {
+        // role ~4 tokens overhead, plus content
+        4 + Self::estimate_tokens(&msg.content_text())
+    }
+
+    /// Trim history so total estimated tokens stay within `max_tokens`.
+    /// Always preserves the most recent messages. Never removes the system
+    /// message (which lives in `self.system`, not in the history vec).
+    async fn trim_history_by_tokens(&self, max_tokens: usize) {
         let mut messages = self.messages.lock().unwrap();
-        if messages.len() > keep_last {
-            let new_len = messages.len() - keep_last + 1;
-            let mut pruned = messages.split_off(new_len);
-            if pruned.len() >= keep_last {
-                let first = pruned.remove(0);
-                messages.clear();
-                messages.push(first);
-                messages.append(&mut pruned);
+        if messages.is_empty() {
+            return;
+        }
+
+        // Calculate total tokens from back to front.
+        // We must keep at minimum the last message (the new user input).
+        let mut kept = 0usize;
+        let mut total = 0usize;
+        for msg in messages.iter().rev() {
+            let t = Self::message_tokens(msg);
+            if total + t > max_tokens && kept > 0 {
+                break;
             }
+            total += t;
+            kept += 1;
+        }
+
+        let drop_count = messages.len().saturating_sub(kept);
+        if drop_count > 0 {
+            messages.drain(0..drop_count);
         }
     }
 
@@ -173,7 +201,9 @@ impl Agent {
     }
 
     async fn run_inner(&self, tx: mpsc::Sender<AgentEvent>, user_input: String) -> Result<()> {
-        self.trim_history(80).await;
+        // Token-aware trim: keep history within ~80k tokens (safe for 128k context models).
+        // System prompt itself is injected separately and not counted here.
+        self.trim_history_by_tokens(80_000).await;
         self.push(Message::user(user_input)).await;
 
         loop {
@@ -263,10 +293,37 @@ impl Agent {
         Ok(())
     }
 
+    /// Build a unified diff preview string between `old` and `new` content.
+    /// Returns at most `max_lines` of diff output to keep approval prompts readable.
+    fn build_diff_preview(old: &str, new_content: &str, max_lines: usize) -> String {
+        let diff = TextDiff::from_lines(old, new_content);
+        let mut lines: Vec<String> = Vec::new();
+
+        for change in diff.iter_all_changes() {
+            let prefix = match change.tag() {
+                ChangeTag::Delete => "- ",
+                ChangeTag::Insert => "+ ",
+                ChangeTag::Equal => "  ",
+            };
+            lines.push(format!("{}{}", prefix, change));
+            if lines.len() >= max_lines {
+                lines.push(format!("  ... ({} lines omitted)", diff.ops().len()));
+                break;
+            }
+        }
+
+        if lines.is_empty() {
+            "(no changes)".to_string()
+        } else {
+            lines.join("")
+        }
+    }
+
     async fn execute_tool(&self, call: &ToolCall) -> Result<crate::tools::ToolResult> {
         let name = call.name.clone();
-        let tool_impls = crate::tools::all_tools();
-        let tool = tool_impls
+        // Use cached tool_impls — no re-construction on every call.
+        let tool = self
+            .tool_impls
             .iter()
             .find(|t| t.def().name == name)
             .with_context(|| format!("unknown tool: {name}"))?;
@@ -312,13 +369,43 @@ impl Agent {
             }
 
             if let Some(approver) = &self.approver {
-                let bytes = args
+                let new_content = args
                     .get("content")
                     .and_then(serde_json::Value::as_str)
-                    .map(str::len)
-                    .unwrap_or(0);
+                    .unwrap_or("");
                 let op = if target.exists() { "update" } else { "create" };
-                let mut desc = format!("{op}: {} ({} bytes)", target.display(), bytes);
+
+                // Build diff preview for existing files.
+                let diff_section = if target.exists() {
+                    match std::fs::read_to_string(&target) {
+                        Ok(old) => {
+                            let preview = Self::build_diff_preview(&old, new_content, 40);
+                            format!("\n{}\n", preview)
+                        }
+                        Err(_) => String::new(),
+                    }
+                } else {
+                    // New file: show first 20 lines as preview.
+                    let preview: String = new_content
+                        .lines()
+                        .take(20)
+                        .map(|l| format!("+ {l}\n"))
+                        .collect();
+                    let total = new_content.lines().count();
+                    let omitted = total.saturating_sub(20);
+                    if omitted > 0 {
+                        format!("\n{}+ ... ({omitted} more lines)\n", preview)
+                    } else {
+                        format!("\n{}\n", preview)
+                    }
+                };
+
+                let mut desc = format!(
+                    "{op}: {} ({} bytes){}",
+                    target.display(),
+                    new_content.len(),
+                    diff_section
+                );
                 if outside {
                     desc = format!("OUTSIDE PROJECT: {desc}");
                 }
@@ -447,5 +534,31 @@ mod tests {
         );
         assert_eq!(slots.len(), 1);
         assert_eq!(slots[0].arguments, "xy");
+    }
+
+    #[test]
+    fn token_estimate_basic() {
+        // 4 chars = 1 token
+        assert_eq!(Agent::estimate_tokens("abcd"), 1);
+        assert_eq!(Agent::estimate_tokens("abcdefgh"), 2);
+        assert_eq!(Agent::estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn diff_preview_shows_changes() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nline2 modified\nline3\n";
+        let preview = Agent::build_diff_preview(old, new, 40);
+        assert!(preview.contains("+ line2 modified"));
+        assert!(preview.contains("- line2"));
+    }
+
+    #[test]
+    fn diff_preview_no_changes() {
+        let content = "same\n";
+        let preview = Agent::build_diff_preview(content, content, 40);
+        // All equal lines — tidak ada + atau - line (hanya spaces)
+        assert!(!preview.contains("+ "));
+        assert!(!preview.contains("- "));
     }
 }

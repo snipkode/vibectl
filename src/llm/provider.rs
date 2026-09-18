@@ -91,6 +91,20 @@ impl Message {
             name: None,
         }
     }
+
+    /// Return the text content of this message for token estimation purposes.
+    /// For tool-call messages, concatenates all argument strings.
+    pub fn content_text(&self) -> String {
+        if let Some(c) = &self.content {
+            return c.clone();
+        }
+        // assistant_tool_calls messages: estimate from arguments
+        self.tool_calls
+            .iter()
+            .map(|tc| tc.arguments.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

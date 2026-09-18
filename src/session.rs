@@ -59,7 +59,7 @@ impl Session {
             model.clone(),
             steering.content,
             provider,
-            &crate::tools::all_tools(),
+            crate::tools::all_tools(),
             cwd.clone(),
         );
         agent.allow_any_path = cfg.allow_any_path;
