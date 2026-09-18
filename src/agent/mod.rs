@@ -1069,16 +1069,34 @@ mod tests {
 
     #[test]
     fn not_conversational_tasks() {
-        assert_ne!(Agent::intent_rules("implement pagination for the API endpoint"), Some(true));
-        assert_ne!(Agent::intent_rules("fix the bug in session.rs"), Some(true));
-        assert_ne!(Agent::intent_rules("add unit tests to agent/mod.rs"), Some(true));
-        assert_ne!(Agent::intent_rules("refactor the auth module to use new tokens"), Some(true));
-        assert_ne!(Agent::intent_rules("run cargo test and fix all failures"), Some(true));
-        assert_ne!(Agent::intent_rules("buat fungsi baru di tools/mod.rs"), Some(true));
+        // Clear task signals → Some(false)
+        assert_eq!(Agent::intent_rules("implement pagination for the API endpoint"), Some(false));
+        assert_eq!(Agent::intent_rules("fix the bug in session.rs"), Some(false));
+        assert_eq!(Agent::intent_rules("add unit tests to agent/mod.rs"), Some(false));
+        assert_eq!(Agent::intent_rules("refactor the auth module to use new tokens"), Some(false));
+        assert_eq!(Agent::intent_rules("run cargo test and fix all failures"), Some(false));
+        assert_eq!(Agent::intent_rules("buat fungsi baru di tools/mod.rs"), Some(false));
     }
 
     #[test]
     fn not_conversational_question_with_action() {
-        assert_ne!(Agent::intent_rules("how do I implement oauth login in session.rs?"), Some(true));
+        // Question starter + action verb → Some(false)
+        assert_eq!(Agent::intent_rules("how do I implement oauth login in session.rs?"), Some(false));
+    }
+
+    #[test]
+    fn intent_none_llm_fallback_cases() {
+        // These are ambiguous — rules return None, LLM must decide.
+
+        // Question with file ref but no task verb
+        assert_eq!(Agent::intent_rules("what does session.rs do?"), None);
+        assert_eq!(Agent::intent_rules("how does agent/mod.rs work?"), None);
+
+        // Medium-length input with no clear signal either way
+        // (>8 words, no task verb, no file ref, no question starter)
+        assert_eq!(Agent::intent_rules("the agent seems to be calling tools unexpectedly"), None);
+
+        // Ambiguous instruction that could be conversational or task
+        assert_eq!(Agent::intent_rules("show me the current model configuration"), None);
     }
 }
