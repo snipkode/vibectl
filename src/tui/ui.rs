@@ -3,7 +3,8 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::UnicodeWidthChar;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [header, body, footer] = Layout::vertical([
@@ -19,13 +20,16 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let status = if let Some(tool) = &app.running_tool {
-        format!(" ⟳ running tool: {tool}")
+    let mut status = if let Some(tool) = &app.running_tool {
+        format!(" ⟳ running: {tool}")
     } else if app.busy {
-        " ⟳ agent thinking…".to_string()
+        " ⟳ working…".to_string()
     } else {
         String::new()
     };
+    if app.scroll_offset > 0 {
+        status.push_str(&format!("  ↑{}", app.scroll_offset));
+    }
     let line = Line::from(Span::styled(
         format!("{}{}", app.model_line(), status),
         Style::default()
@@ -39,7 +43,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(cmd) = &app.pending_approval {
         let text = Line::from(vec![
             Span::styled(
-                " Approve shell command? [y]es [n]o (esc=cancel)",
+                " Approve? [y]es [n]o (esc=cancel)",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -82,83 +86,204 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_body(frame: &mut Frame, area: Rect, app: &App) {
-    if app.show_help {
-        let help_lines: Vec<Line> = HELP_TEXT
-            .lines()
-            .map(|l| {
-                Line::from(Span::styled(
-                    l,
-                    if l.starts_with('═') {
-                        Style::default().fg(Color::DarkGray)
-                    } else if l.is_empty() {
-                        Style::default()
-                    } else {
-                        Style::default().fg(Color::Cyan)
-                    },
-                ))
-            })
-            .collect();
-        let p = Paragraph::new(help_lines)
-            .scroll((app.scroll, 0))
-            .block(Block::default().borders(Borders::ALL).title(" Help "));
-        frame.render_widget(p, area);
-        return;
-    }
+    let width = area.width.max(1) as usize;
+    let view_h = area.height.max(1) as usize;
 
-    let mut lines: Vec<Line> = Vec::new();
-    for msg in &app.messages {
-        let (label, label_style) = label_for(&msg.role);
-        lines.push(Line::from(vec![Span::styled(
-            label,
-            label_style.add_modifier(Modifier::BOLD),
-        )]));
-        if let Some(kind) = &msg.kind {
-            lines.push(Line::from(Span::styled(
-                format!("  {} ", kind),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            )));
-        }
-        let body_style = match msg.role {
-            MsgRole::User => Style::default().fg(Color::White),
-            MsgRole::Assistant => Style::default().fg(Color::LightGreen),
-            MsgRole::Tool => Style::default().fg(Color::DarkGray),
-            MsgRole::Error => Style::default().fg(Color::Red),
-            MsgRole::System => Style::default().fg(Color::DarkGray),
-            MsgRole::Plan => Style::default().fg(Color::Cyan),
-        };
-        let mut rendered = markdown_to_lines(&msg.text, body_style);
-        lines.append(&mut rendered);
-        lines.push(Line::raw(""));
-    }
+    let rows = if app.show_help {
+        help_rows()
+    } else {
+        message_rows(app)
+    };
 
-    if lines.is_empty() {
-        lines.push(Line::raw(""));
-    }
+    let expanded = wrap_rows(rows, width);
+    let total = expanded.len();
+    let max_offset = total.saturating_sub(view_h);
+    let offset = app.scroll_offset.min(max_offset);
+    let start = max_offset - offset;
+    let end = (start + view_h).min(total);
+    let visible: Vec<Line> = expanded[start..end].to_vec();
 
-    let max_scroll = lines.len().saturating_sub(area.height as usize);
-    let max_scroll = max_scroll.min(u16::MAX as usize) as u16;
-    let scroll = app.scroll.clamp(0, max_scroll);
-
-    let p = Paragraph::new(lines)
-        .scroll((scroll, 0))
-        .wrap(Wrap { trim: true });
+    let p = Paragraph::new(visible).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(if app.show_help { " Help " } else { " Chat " }),
+    );
     frame.render_widget(p, area);
 }
 
-fn label_for(role: &MsgRole) -> (String, Style) {
-    match role {
-        MsgRole::User => ("You".to_string(), Style::default().fg(Color::Green)),
-        MsgRole::Assistant => ("Agent".to_string(), Style::default().fg(Color::Cyan)),
-        MsgRole::Tool => ("Tool".to_string(), Style::default().fg(Color::Magenta)),
-        MsgRole::Error => ("Error".to_string(), Style::default().fg(Color::Red)),
-        MsgRole::System => ("System".to_string(), Style::default().fg(Color::DarkGray)),
-        MsgRole::Plan => ("Plan".to_string(), Style::default().fg(Color::Yellow)),
+fn help_rows() -> Vec<Line<'static>> {
+    HELP_TEXT
+        .lines()
+        .map(|l| {
+            Line::from(Span::styled(
+                l.to_string(),
+                if l.starts_with('═') {
+                    Style::default().fg(Color::DarkGray)
+                } else if l.trim().starts_with('/') {
+                    Style::default().fg(Color::White)
+                } else if l.is_empty() {
+                    Style::default()
+                } else {
+                    Style::default().fg(Color::Cyan)
+                },
+            ))
+        })
+        .collect()
+}
+
+fn message_rows(app: &App) -> Vec<Line<'static>> {
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    for msg in &app.messages {
+        match msg.role {
+            MsgRole::Tool => {
+                append_tool(&mut rows, msg.kind.clone().unwrap_or_default(), &msg.text)
+            }
+            _ => append_text(&mut rows, &msg.role, &msg.text),
+        }
+    }
+    if rows.is_empty() {
+        rows.push(Line::raw(""));
+    }
+    rows
+}
+
+fn append_text(rows: &mut Vec<Line<'static>>, role: &MsgRole, text: &str) {
+    let (prefix, pstyle, body_style) = match role {
+        MsgRole::User => (
+            "You: ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::White),
+        ),
+        MsgRole::Assistant => (
+            "Agent: ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::LightGreen),
+        ),
+        MsgRole::Error => (
+            "✖ ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red),
+        ),
+        MsgRole::System => ("", Style::default(), Style::default().fg(Color::DarkGray)),
+        MsgRole::Plan => (
+            "◈ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Cyan),
+        ),
+        MsgRole::Tool => unreachable!(),
+    };
+    let mut body = markdown_to_lines(text, body_style);
+    if body.is_empty() {
+        body.push(Line::raw(""));
+    }
+    let mut first = Line::from(Span::styled(prefix, pstyle));
+    if let Some(l) = body.first_mut() {
+        first.spans.extend(std::mem::take(&mut l.spans));
+    }
+    rows.push(first);
+    rows.extend(body.into_iter().skip(1));
+}
+
+fn append_tool(rows: &mut Vec<Line<'static>>, kind: String, text: &str) {
+    rows.push(Line::from(vec![
+        Span::styled(
+            "◧ ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            kind,
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    for line in tool_summary(text) {
+        rows.push(Line::from(Span::styled(
+            line,
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 }
 
-fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'_>> {
+fn tool_summary(text: &str) -> Vec<String> {
+    const MAX_LINES: usize = 5;
+    const MAX_CHARS: usize = 200;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return vec!["(empty)".to_string()];
+    }
+    let total = lines.len();
+    let mut out: Vec<String> = lines
+        .iter()
+        .take(MAX_LINES)
+        .map(|l| {
+            if l.chars().count() > MAX_CHARS {
+                let cut: String = l.chars().take(MAX_CHARS).collect();
+                format!("{cut}…")
+            } else {
+                (*l).to_string()
+            }
+        })
+        .collect();
+    if total > MAX_LINES {
+        out.push(format!("… (+{} more lines)", total - MAX_LINES));
+    }
+    out
+}
+
+fn wrap_rows(rows: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for line in rows {
+        let mut wrapped = Vec::new();
+        wrap_line(line, width, &mut wrapped);
+        if wrapped.is_empty() {
+            out.push(Line::default());
+        } else {
+            out.extend(wrapped);
+        }
+    }
+    out
+}
+
+fn wrap_line(line: Line<'static>, width: usize, out: &mut Vec<Line<'static>>) {
+    let mut current: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        let style = span.style;
+        let content: String = span.content.into_owned();
+        let mut seg = String::new();
+        let mut segw = 0usize;
+        for ch in content.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if segw + w > width && !seg.is_empty() {
+                current.push(Span::styled(std::mem::take(&mut seg), style));
+                out.push(Line::from(std::mem::take(&mut current)));
+                segw = 0;
+            }
+            seg.push(ch);
+            segw += w;
+        }
+        if !seg.is_empty() {
+            current.push(Span::styled(seg, style));
+        }
+    }
+    if !current.is_empty() {
+        out.push(Line::from(current));
+    }
+}
+
+fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code = false;
     let mut code_lines = Vec::new();
@@ -222,7 +347,7 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'_>> {
     lines
 }
 
-fn flush_code<'a>(code_lines: &mut Vec<Line<'a>>, lines: &mut Vec<Line<'a>>, style: Style) {
+fn flush_code(code_lines: &mut Vec<Line<'static>>, lines: &mut Vec<Line<'static>>, style: Style) {
     if code_lines.is_empty() {
         return;
     }
@@ -231,16 +356,16 @@ fn flush_code<'a>(code_lines: &mut Vec<Line<'a>>, lines: &mut Vec<Line<'a>>, sty
     lines.push(Line::raw(""));
 }
 
-fn markdown_inline(src: &str, base: Style) -> Line<'_> {
+fn markdown_inline(src: &str, base: Style) -> Line<'static> {
     let spans = parse_inline(src, base);
     if spans.is_empty() {
-        Line::raw(src)
+        Line::raw(src.to_string())
     } else {
         Line::from(spans)
     }
 }
 
-fn parse_inline(src: &str, base: Style) -> Vec<Span<'_>> {
+fn parse_inline(src: &str, base: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = src;
     while !rest.is_empty() {
@@ -249,7 +374,7 @@ fn parse_inline(src: &str, base: Style) -> Vec<Span<'_>> {
         {
             let end = i + 1;
             spans.push(Span::styled(
-                &rest[1..end],
+                rest[1..end].to_string(),
                 Style::default().fg(Color::Cyan),
             ));
             rest = &rest[end + 1..];
@@ -260,7 +385,7 @@ fn parse_inline(src: &str, base: Style) -> Vec<Span<'_>> {
         {
             let end = i + 2;
             spans.push(Span::styled(
-                &rest[2..end],
+                rest[2..end].to_string(),
                 base.add_modifier(Modifier::BOLD),
             ));
             rest = &rest[end + 2..];
@@ -271,7 +396,7 @@ fn parse_inline(src: &str, base: Style) -> Vec<Span<'_>> {
         {
             let end = i + 1;
             spans.push(Span::styled(
-                &rest[1..end],
+                rest[1..end].to_string(),
                 base.add_modifier(Modifier::ITALIC),
             ));
             rest = &rest[end + 1..];

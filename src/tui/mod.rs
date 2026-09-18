@@ -1,13 +1,16 @@
 pub mod app;
+pub mod backend;
 pub mod ui;
 
 use crate::agent::{AgentEvent, Approval, Approver};
 use crate::session::Session;
+use crate::tui::backend::ResilientBackend;
 use anyhow::Result;
 use async_trait::async_trait;
-use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, Event as CEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +24,7 @@ const TICK_MS: Duration = Duration::from_millis(80);
 pub enum Msg {
     Tick,
     Key(KeyEvent),
+    Mouse(MouseEvent),
     App(AppMsg),
 }
 
@@ -65,9 +69,12 @@ pub async fn run(session: Session) -> Result<()> {
     let input_tx = msg_tx.clone();
     std::thread::spawn(move || {
         while let Ok(ev) = event::read() {
-            if let CEvent::Key(k) = ev
-                && input_tx.blocking_send(Msg::Key(k)).is_err()
-            {
+            let msg = match ev {
+                CEvent::Key(k) => Msg::Key(k),
+                CEvent::Mouse(m) => Msg::Mouse(m),
+                _ => continue,
+            };
+            if input_tx.blocking_send(msg).is_err() {
                 break;
             }
         }
@@ -76,20 +83,31 @@ pub async fn run(session: Session) -> Result<()> {
     let approver = Arc::new(TuiApprover { tx: msg_tx.clone() });
     app.session.agent.approver = Some(approver.clone());
 
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    crossterm::terminal::enable_raw_mode()?;
+
+    let mut terminal = Terminal::new(ResilientBackend::new())?;
     terminal.clear()?;
 
-    crossterm::execute!(io::stdout(), crossterm::cursor::Hide)?;
+    crossterm::execute!(
+        io::stdout(),
+        crossterm::cursor::Hide,
+        event::EnableMouseCapture
+    )?;
 
     let res = run_loop(&mut terminal, &msg_tx, &mut msg_rx, &mut app).await;
 
-    crossterm::execute!(io::stdout(), crossterm::cursor::Show)?;
+    let _ = crossterm::terminal::disable_raw_mode();
+    crossterm::execute!(
+        io::stdout(),
+        crossterm::cursor::Show,
+        event::DisableMouseCapture
+    )?;
     terminal.clear()?;
     res
 }
 
 async fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<ResilientBackend>,
     msg_tx: &mpsc::Sender<Msg>,
     msg_rx: &mut mpsc::Receiver<Msg>,
     app: &mut App,
@@ -105,6 +123,7 @@ async fn run_loop(
         match msg {
             Msg::Tick => {}
             Msg::Key(key) => handle_key(terminal, msg_tx, app, key).await?,
+            Msg::Mouse(m) => handle_mouse(app, m),
             Msg::App(m) => handle_app_msg(app, m).await,
         }
     }
@@ -131,8 +150,16 @@ async fn handle_app_msg(app: &mut App, msg: AppMsg) {
     }
 }
 
+fn handle_mouse(app: &mut App, m: MouseEvent) {
+    match m.kind {
+        MouseEventKind::ScrollUp => app.scroll_up(3),
+        MouseEventKind::ScrollDown => app.scroll_down(3),
+        _ => {}
+    }
+}
+
 async fn handle_key(
-    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    _terminal: &mut Terminal<ResilientBackend>,
     msg_tx: &mpsc::Sender<Msg>,
     app: &mut App,
     key: KeyEvent,
@@ -166,6 +193,7 @@ async fn handle_key(
         }
         KeyCode::Enter => {
             if app.busy {
+                app.follow_bottom();
                 return Ok(());
             }
             if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -196,7 +224,7 @@ async fn handle_key(
             std::process::exit(0);
         }
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.scroll = 0;
+            app.follow_bottom();
         }
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Up => app.history_prev(),
@@ -207,8 +235,8 @@ async fn handle_key(
         KeyCode::End => app.move_end(),
         KeyCode::Backspace => app.backspace(),
         KeyCode::Delete => app.delete_at_cursor(),
-        KeyCode::PageUp => app.scroll = app.scroll.saturating_add(10),
-        KeyCode::PageDown => app.scroll = app.scroll.saturating_sub(10),
+        KeyCode::PageUp => app.scroll_up(10),
+        KeyCode::PageDown => app.scroll_down(10),
         KeyCode::Char(c) if !app.busy => {
             app.insert_char(c);
         }
@@ -228,7 +256,7 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
         "/quit" | "/exit" => std::process::exit(0),
         "/clear" => {
             app.messages.clear();
-            app.scroll = 0;
+            app.follow_bottom();
         }
         "/provider" => {
             app.push_system(format!(

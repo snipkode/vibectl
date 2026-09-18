@@ -4,12 +4,13 @@ use tokio::sync::oneshot;
 pub const HELP_TEXT: &str = "\
 Controls
 ════════
-Enter            Send message
+Enter            Send / follow stream to bottom
 Shift+Enter      Newline
 ↑/↓              History navigation
+PgUp/PgDn, wheel Scroll through conversation
 Ctrl+C           Cancel running task / clear input
 Ctrl+D           Exit
-Ctrl+L           Clear screen scroll
+Ctrl+L           Jump to latest message
 Esc              Close help / cancel
 ? or /help       Toggle this help
 
@@ -98,7 +99,7 @@ pub struct App {
     pub history_pos: Option<usize>,
     pub busy: bool,
     pub show_help: bool,
-    pub scroll: u16,
+    pub scroll_offset: usize,
     pub running_tool: Option<String>,
     pub active_assistant: Option<usize>,
     pub last_status: String,
@@ -119,7 +120,7 @@ impl App {
             history_pos: None,
             busy: false,
             show_help: false,
-            scroll: 0,
+            scroll_offset: 0,
             running_tool: None,
             active_assistant: None,
             last_status: String::new(),
@@ -212,6 +213,7 @@ impl App {
                 self.history.remove(0);
             }
         }
+        self.scroll_offset = 0;
         text
     }
 
@@ -277,5 +279,17 @@ impl App {
         if let Some(s) = status {
             self.last_status = s;
         }
+    }
+
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+    }
+
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    }
+
+    pub fn follow_bottom(&mut self) {
+        self.scroll_offset = 0;
     }
 }
