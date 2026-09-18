@@ -138,18 +138,27 @@ Before touching a single file, perform in order:
 1. Locate project root — look for .git, Cargo.toml, package.json, go.mod,
    pyproject.toml, pom.xml, or .vibectl directory.
 
-2. Find agent instructions — check for (do NOT assume they exist):
+2. MAP THE PROJECT STRUCTURE FIRST — if you don't know what files exist,
+   use glob BEFORE assuming any filename:
+     glob("src/**/*.rs")        — for Rust
+     glob("**/*.py")            — for Python
+     glob("src/**/*.{ts,tsx}")  — for TypeScript
+     glob("**/*.go")            — for Go
+   NEVER guess or invent filenames like "project.rs", "main.py", "app.ts".
+   Always verify a file exists before reading it.
+
+3. Find agent instructions — check for (do NOT assume they exist):
    AGENTS.md, AGENT.md, CLAUDE.md, GEMINI.md, .cursorrules,
    .vibectl/AGENTS.md, .vibectl/steer.md,
    .vibectl/steering/*.md, .kiro/steering/*.md, steering/*.md
 
-3. Read dependency manifest — Cargo.toml / package.json / go.mod / etc.
+4. Read dependency manifest — Cargo.toml / package.json / go.mod / etc.
    Never assume a library is available without checking the manifest.
 
-4. Identify existing abstractions — search for relevant modules, traits,
+5. Identify existing abstractions — search for relevant modules, traits,
    interfaces before writing new code.
 
-5. Find existing tests — locate test files before adding new ones.
+6. Find existing tests — locate test files before adding new ones.
 
 ═══════════════════════════════════════════════════════════════
 INSTRUCTION PRIORITY (most specific wins)
@@ -289,7 +298,8 @@ pub fn discover(cwd: &Path) -> DiscoveryReport {
             if p.is_file() {
                 match std::fs::read_to_string(&p) {
                     Ok(raw) => {
-                        let note = first_heading(&raw).unwrap_or_else(|| "agent instructions".into());
+                        let note =
+                            first_heading(&raw).unwrap_or_else(|| "agent instructions".into());
                         report
                             .instructions
                             .push(DiscoveryEntry::found(p.display().to_string(), &note));
@@ -320,8 +330,7 @@ pub fn discover(cwd: &Path) -> DiscoveryReport {
             if p.is_file() {
                 match std::fs::read_to_string(&p) {
                     Ok(raw) => {
-                        let note =
-                            first_heading(&raw).unwrap_or_else(|| "vibectl steering".into());
+                        let note = first_heading(&raw).unwrap_or_else(|| "vibectl steering".into());
                         report
                             .instructions
                             .push(DiscoveryEntry::found(p.display().to_string(), &note));
@@ -371,12 +380,10 @@ pub fn discover(cwd: &Path) -> DiscoveryReport {
                     paths.sort();
                     for p in paths {
                         if let Ok(raw) = std::fs::read_to_string(&p) {
-                            let note = first_heading(&raw)
-                                .unwrap_or_else(|| dir_name.to_string());
-                            report.steering.push(DiscoveryEntry::found(
-                                p.display().to_string(),
-                                &note,
-                            ));
+                            let note = first_heading(&raw).unwrap_or_else(|| dir_name.to_string());
+                            report
+                                .steering
+                                .push(DiscoveryEntry::found(p.display().to_string(), &note));
                             content.push_str(&raw);
                             content.push('\n');
                             report.sources.push(p.display().to_string());
@@ -421,19 +428,126 @@ pub fn discover(cwd: &Path) -> DiscoveryReport {
     }
 
     // ── Assemble final prompt content ─────────────────────────────────────────
+
+    // Inject a lightweight project file tree so the LLM knows what files exist
+    // without having to call glob first. Capped at 80 entries to stay concise.
+    let tree_section = if let Some(root) = &root {
+        build_project_tree(root, 80)
+    } else {
+        String::new()
+    };
+
     if content.is_empty() {
         report.sources.push("built-in defaults".to_string());
-        report.content = DEFAULT_SYSTEM_PROMPT.to_string();
+        report.content = if tree_section.is_empty() {
+            DEFAULT_SYSTEM_PROMPT.to_string()
+        } else {
+            format!("{DEFAULT_SYSTEM_PROMPT}\n\n{tree_section}")
+        };
     } else {
         report.content = format!(
-            "Project context from steering files ({}):\n\n{}\n\n{}",
+            "Project context from steering files ({}):\n\n{}\n\n{}\n\n{}",
             report.sources.join(", "),
             content.trim(),
+            tree_section,
             DEFAULT_SYSTEM_PROMPT
         );
     }
 
     report
+}
+
+/// Build a concise project file tree for injection into the system prompt.
+/// Lists source files under common source directories, capped at `max_entries`.
+/// Skips build artifacts, hidden directories, and binary files.
+fn build_project_tree(root: &Path, max_entries: usize) -> String {
+    let skip_dirs: &[&str] = &[
+        "target",
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "out",
+        ".cache",
+        "__pycache__",
+        ".venv",
+        "vendor",
+    ];
+    let source_exts: &[&str] = &[
+        "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "kt", "rb", "ex", "exs", "toml",
+        "yaml", "yml", "json", "md", "sh", "sql", "html", "css",
+    ];
+
+    let mut entries: Vec<String> = Vec::new();
+    collect_tree(
+        root,
+        root,
+        skip_dirs,
+        source_exts,
+        &mut entries,
+        max_entries,
+    );
+
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "═══════════════════════════════════════════════════════════════\n\
+         PROJECT FILE TREE (auto-discovered at startup)\n\
+         ═══════════════════════════════════════════════════════════════\n\
+         Use these paths directly with read_file, list_symbols, etc.\n\
+         Do NOT guess filenames — use glob if a file is not listed here.\n\n\
+         {}\n",
+        entries.join("\n")
+    )
+}
+
+fn collect_tree(
+    root: &Path,
+    dir: &Path,
+    skip_dirs: &[&str],
+    source_exts: &[&str],
+    out: &mut Vec<String>,
+    max: usize,
+) {
+    if out.len() >= max {
+        return;
+    }
+
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+        Err(_) => return,
+    };
+    entries.sort();
+
+    for path in entries {
+        if out.len() >= max {
+            out.push(format!("  ... ({} entries shown, use glob for more)", max));
+            return;
+        }
+
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        // Skip hidden files/dirs (except .vibectl)
+        if name.starts_with('.') && name != ".vibectl" {
+            continue;
+        }
+
+        if path.is_dir() {
+            if skip_dirs.contains(&name) {
+                continue;
+            }
+            collect_tree(root, &path, skip_dirs, source_exts, out, max);
+        } else if path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if source_exts.contains(&ext) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(format!("  {}", rel.display()));
+                }
+            }
+        }
+    }
 }
 
 /// Backward-compatible wrapper used by Session.
