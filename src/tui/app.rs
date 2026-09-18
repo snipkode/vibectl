@@ -111,6 +111,20 @@ impl MessageItem {
     }
 }
 
+/// All slash commands with their description and usage hint.
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("/help",     "Toggle help panel",               "/help"),
+    ("/clear",    "Clear message view",               "/clear"),
+    ("/new",      "Reset conversation history",       "/new"),
+    ("/model",    "Switch model",                     "/model <name>"),
+    ("/plan",     "Generate implementation plan",     "/plan <task>"),
+    ("/spec",     "Show current plan",                "/spec"),
+    ("/steer",    "Append rule to steer.md",          "/steer <rule>"),
+    ("/cfg",      "Print effective config",           "/cfg"),
+    ("/provider", "Show provider + model info",       "/provider"),
+    ("/quit",     "Exit vibectl",                     "/quit"),
+];
+
 pub struct App {
     pub session: Session,
     pub messages: Vec<MessageItem>,
@@ -128,13 +142,15 @@ pub struct App {
     pub last_status: String,
     pub pending_approval: Option<String>,
     pub pending_approval_tx: Option<oneshot::Sender<bool>>,
-    /// How many consecutive Ctrl+C presses while idle (resets on any other key)
     pub ctrl_c_count: u8,
-    /// frame at which the last idle Ctrl+C was pressed (for timeout)
     pub ctrl_c_frame: u64,
-    /// Monotonically increasing run ID — incremented each begin_run().
-    /// Events arriving with a stale ID are silently dropped after interrupt.
     pub run_id: u64,
+    /// Filtered command suggestions (indices into COMMANDS)
+    pub suggestions: Vec<usize>,
+    /// Currently highlighted suggestion index (into suggestions vec)
+    pub suggestion_sel: usize,
+    /// Whether suggestion dropdown is visible
+    pub suggestion_visible: bool,
 }
 
 impl App {
@@ -164,7 +180,74 @@ impl App {
             ctrl_c_count: 0,
             ctrl_c_frame: 0,
             run_id: 0,
+            suggestions: vec![],
+            suggestion_sel: 0,
+            suggestion_visible: false,
         }
+    }
+
+    /// Update suggestion list based on current input. Call after every keystroke.
+    pub fn update_suggestions(&mut self) {
+        let input = self.input.trim_start();
+        if !input.starts_with('/') || self.busy {
+            self.suggestion_visible = false;
+            self.suggestions.clear();
+            return;
+        }
+        // Filter commands that start with the typed prefix
+        let prefix = input.split_whitespace().next().unwrap_or(input);
+        self.suggestions = COMMANDS
+            .iter()
+            .enumerate()
+            .filter(|(_, (cmd, _, _))| cmd.starts_with(prefix))
+            .map(|(i, _)| i)
+            .collect();
+        self.suggestion_visible = !self.suggestions.is_empty();
+        // Clamp selection
+        if self.suggestion_sel >= self.suggestions.len() {
+            self.suggestion_sel = 0;
+        }
+    }
+
+    pub fn suggestion_prev(&mut self) {
+        if self.suggestions.is_empty() { return; }
+        if self.suggestion_sel == 0 {
+            self.suggestion_sel = self.suggestions.len() - 1;
+        } else {
+            self.suggestion_sel -= 1;
+        }
+    }
+
+    pub fn suggestion_next(&mut self) {
+        if self.suggestions.is_empty() { return; }
+        self.suggestion_sel = (self.suggestion_sel + 1) % self.suggestions.len();
+    }
+
+    /// Complete input with the currently selected suggestion.
+    /// Returns true if completion happened.
+    pub fn complete_suggestion(&mut self) -> bool {
+        if !self.suggestion_visible || self.suggestions.is_empty() {
+            return false;
+        }
+        let idx = self.suggestions[self.suggestion_sel];
+        let (cmd, _, usage) = COMMANDS[idx];
+        // If usage has args (space after cmd), complete with usage; else just cmd + space
+        let completed = if usage.contains(' ') {
+            format!("{} ", cmd)
+        } else {
+            format!("{} ", cmd)
+        };
+        self.input = completed;
+        self.cursor = self.input.chars().count();
+        self.suggestion_visible = false;
+        self.suggestions.clear();
+        true
+    }
+
+    pub fn hide_suggestions(&mut self) {
+        self.suggestion_visible = false;
+        self.suggestions.clear();
+        self.suggestion_sel = 0;
     }
 
     #[allow(dead_code)]

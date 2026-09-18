@@ -1,4 +1,4 @@
-use crate::tui::app::{App, HELP_TEXT, MsgRole};
+use crate::tui::app::{App, COMMANDS, HELP_TEXT, MsgRole};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -131,6 +131,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_header(frame, header, app);
     render_body(frame, body, app);
     render_input(frame, input, app);
+    // Dropdown rendered last so it floats above input box
+    if app.suggestion_visible {
+        render_suggestions(frame, input, app);
+    }
 }
 
 // ─── Header ───────────────────────────────────────────────────────────────────
@@ -543,6 +547,129 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         hint_rect,
     );
 }
+// ─── Command suggestion dropdown ─────────────────────────────────────────────
+//
+//  Floats just above the input box:
+//
+//  ╭─────────────────────────────────╮
+//  │ /clear   Clear message view     │
+//  │ /cfg     Print effective config │  ← highlighted
+//  ╰─────────────────────────────────╯
+//  ╭── input box ───────────────────╮
+
+fn render_suggestions(frame: &mut Frame, input_area: Rect, app: &App) {
+    if app.suggestions.is_empty() {
+        return;
+    }
+
+    let margin: u16 = 2;
+    let max_visible: usize = 6;
+    let count = app.suggestions.len().min(max_visible);
+    let dropdown_h = count as u16 + 2; // border top + items + border bottom
+
+    // Position: just above the input box, same horizontal margin
+    if input_area.y < dropdown_h {
+        return; // not enough room
+    }
+
+    // Width: match inner width of input box (same margin)
+    let dropdown_w = input_area.width.saturating_sub(margin * 2);
+    let dropdown_x = input_area.x + margin;
+    let dropdown_y = input_area.y.saturating_sub(dropdown_h);
+
+    let dropdown_rect = Rect {
+        x: dropdown_x,
+        y: dropdown_y,
+        width: dropdown_w,
+        height: dropdown_h,
+    };
+
+    // Clear background so it overlays chat properly
+    frame.render_widget(Clear, dropdown_rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(C_INPUT_ACTIVE))
+        .style(Style::default().bg(C_SURFACE2));
+
+    let inner = block.inner(dropdown_rect);
+    frame.render_widget(block, dropdown_rect);
+
+    // Build rows — max name width for alignment
+    let name_w: usize = app.suggestions.iter()
+        .map(|&i| COMMANDS[i].0.len())
+        .max()
+        .unwrap_or(8);
+
+    for (row, &cmd_idx) in app.suggestions.iter().take(max_visible).enumerate() {
+        let (name, desc, _usage) = COMMANDS[cmd_idx];
+        let is_sel = row == app.suggestion_sel;
+
+        let row_rect = Rect {
+            x: inner.x,
+            y: inner.y + row as u16,
+            width: inner.width,
+            height: 1,
+        };
+
+        // Highlight selected row
+        if is_sel {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(C_INPUT_ACTIVE)),
+                row_rect,
+            );
+        }
+
+        let name_col = if is_sel { Color::White } else { C_AGENT_MARK };
+        let desc_col = if is_sel { Color::Rgb(200, 220, 255) } else { C_HINT };
+
+        // Padding: 1 space left, name left-aligned, desc right of name
+        let desc_available = (inner.width as usize)
+            .saturating_sub(name_w + 3);
+        let desc_short: String = if desc.len() > desc_available {
+            format!("{}…", &desc[..desc_available.saturating_sub(1)])
+        } else {
+            desc.to_string()
+        };
+
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<width$}", name, width = name_w),
+                Style::default().fg(name_col).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(desc_short, Style::default().fg(desc_col)),
+        ]);
+
+        let bg = if is_sel { C_INPUT_ACTIVE } else { C_SURFACE2 };
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(bg)),
+            row_rect,
+        );
+    }
+
+    // If more items than visible, show count hint at bottom
+    if app.suggestions.len() > max_visible {
+        let extra = app.suggestions.len() - max_visible;
+        let hint_rect = Rect {
+            x: inner.x,
+            y: inner.y + max_visible as u16,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("  +{extra} more  ↑↓ to navigate"),
+                Style::default().fg(C_HINT),
+            )))
+            .style(Style::default().bg(C_SURFACE2)),
+            hint_rect,
+        );
+    }
+}
+
 // ─── Approval modal ───────────────────────────────────────────────────────────
 
 fn render_approval_modal(frame: &mut Frame, app: &App) {

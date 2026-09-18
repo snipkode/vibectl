@@ -196,7 +196,10 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Esc => {
-            if app.show_help {
+            if app.suggestion_visible {
+                app.hide_suggestions();
+                return Ok(());
+            } else if app.show_help {
                 app.show_help = false;
             } else if app.busy {
                 // Esc while agent running = interrupt (same as Ctrl+C)
@@ -212,7 +215,18 @@ async fn handle_key(
                 app.cursor = 0;
             }
         }
+        KeyCode::Tab => {
+            // Tab completes the highlighted suggestion
+            if app.suggestion_visible {
+                app.complete_suggestion();
+            }
+        }
         KeyCode::Enter => {
+            // Enter on suggestion = complete, not send
+            if app.suggestion_visible {
+                app.complete_suggestion();
+                return Ok(());
+            }
             if app.busy {
                 app.follow_bottom();
                 let typed = app.input.clone();
@@ -301,8 +315,20 @@ async fn handle_key(
             app.ctrl_c_count = 0;
             app.show_help = !app.show_help;
         }
-        KeyCode::Up => app.history_prev(),
-        KeyCode::Down => app.history_next(),
+        KeyCode::Up => {
+            if app.suggestion_visible {
+                app.suggestion_prev();
+            } else {
+                app.history_prev();
+            }
+        }
+        KeyCode::Down => {
+            if app.suggestion_visible {
+                app.suggestion_next();
+            } else {
+                app.history_next();
+            }
+        }
         KeyCode::Left => app.move_left(),
         KeyCode::Right => app.move_right(),
         KeyCode::Home => app.move_home(),
@@ -310,16 +336,19 @@ async fn handle_key(
         KeyCode::Backspace => {
             app.ctrl_c_count = 0;
             app.backspace();
+            app.update_suggestions();
         }
         KeyCode::Delete => {
             app.ctrl_c_count = 0;
             app.delete_at_cursor();
+            app.update_suggestions();
         }
         KeyCode::PageUp => app.scroll_up(10),
         KeyCode::PageDown => app.scroll_down(10),
         KeyCode::Char(c) => {
             app.ctrl_c_count = 0;
             app.insert_char(c);
+            app.update_suggestions();
         }
         _ => {}
     }
