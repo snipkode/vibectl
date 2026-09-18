@@ -207,6 +207,65 @@ impl Agent {
     /// Complexity score threshold above which auto-planning triggers.
     pub const PLAN_THRESHOLD: u8 = 3;
 
+    /// Returns true if the input looks conversational (greeting, question,
+    /// explanation request) — i.e. no tools should be offered to the LLM.
+    ///
+    /// This is enforced at the protocol level: when true, tools are stripped
+    /// from the ChatRequest so the LLM physically cannot call them.
+    pub fn is_conversational(input: &str) -> bool {
+        let trimmed = input.trim();
+        let lower = trimmed.to_lowercase();
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        let word_count = words.len();
+
+        // Very short input — almost certainly conversational.
+        if word_count <= 2 {
+            return true;
+        }
+
+        // Explicit greetings / social phrases.
+        let greetings = [
+            "halo", "hai", "hi", "hello", "hey", "hei",
+            "good morning", "good afternoon", "good evening", "good night",
+            "selamat pagi", "selamat siang", "selamat malam",
+            "thanks", "thank you", "terima kasih", "makasih",
+            "ok", "okay", "oke", "got it", "understood", "noted",
+            "nice", "great", "cool", "awesome", "mantap", "sip",
+            "bye", "goodbye", "see you", "sampai jumpa",
+        ];
+        for g in &greetings {
+            if lower == *g || lower.starts_with(&format!("{g} ")) || lower.ends_with(&format!(" {g}")) {
+                return true;
+            }
+        }
+
+        // Question words with no action verb → explanation request, not a task.
+        let question_starters = [
+            "what is", "what are", "what does", "what do",
+            "how does", "how do", "how is", "how are",
+            "why does", "why do", "why is",
+            "can you explain", "please explain", "explain",
+            "tell me", "describe", "apa itu", "apa yang", "apa maksud",
+            "bagaimana", "kenapa", "mengapa",
+        ];
+        let action_verbs = [
+            "implement", "create", "add", "fix", "refactor", "write",
+            "build", "run", "execute", "delete", "remove", "update",
+            "install", "deploy", "migrate", "test", "generate",
+            "buat", "tambah", "hapus", "ubah", "jalankan", "perbaiki",
+        ];
+
+        let has_question_start = question_starters.iter().any(|q| lower.starts_with(q));
+        let has_action_verb = action_verbs.iter().any(|v| lower.contains(v));
+
+        // A question without an action verb = conversational.
+        if has_question_start && !has_action_verb {
+            return true;
+        }
+
+        false
+    }
+
     pub async fn plan(&self, task: &str) -> Result<String> {
         let req = ChatRequest {
             model: self.model.clone(),
@@ -328,7 +387,11 @@ impl Agent {
             }
         }
 
-        self.push(Message::user(user_input)).await;
+        self.push(Message::user(user_input.clone())).await;
+
+        // If the input is conversational, strip tools entirely so the LLM
+        // cannot physically call shell_exec or write_file.
+        let conversational = Self::is_conversational(&user_input);
 
         loop {
             let messages = self.snapshot().await;
@@ -338,7 +401,8 @@ impl Agent {
                 temperature: self.temperature,
                 max_tokens: self.max_tokens,
                 stream: true,
-                tools: self.tools.clone(),
+                // Protocol-level enforcement: conversational inputs get NO tools.
+                tools: if conversational { vec![] } else { self.tools.clone() },
                 system: Some(self.system.clone()),
             };
 
@@ -896,5 +960,47 @@ mod tests {
                 "update config.rs, session.rs, and main.rs to support the new provider format"
             ) >= Agent::PLAN_THRESHOLD
         );
+    }
+
+    #[test]
+    fn conversational_greetings() {
+        assert!(Agent::is_conversational("halo"));
+        assert!(Agent::is_conversational("hi"));
+        assert!(Agent::is_conversational("hello"));
+        assert!(Agent::is_conversational("hai"));
+        assert!(Agent::is_conversational("thanks"));
+        assert!(Agent::is_conversational("terima kasih"));
+        assert!(Agent::is_conversational("ok"));
+        assert!(Agent::is_conversational("mantap"));
+    }
+
+    #[test]
+    fn conversational_short_inputs() {
+        assert!(Agent::is_conversational("ok sip"));
+        assert!(Agent::is_conversational("noted"));
+    }
+
+    #[test]
+    fn conversational_questions_no_action() {
+        assert!(Agent::is_conversational("what does session.rs do?"));
+        assert!(Agent::is_conversational("how does the agent loop work?"));
+        assert!(Agent::is_conversational("explain the tool dispatch"));
+        assert!(Agent::is_conversational("what is a steering file?"));
+    }
+
+    #[test]
+    fn not_conversational_tasks() {
+        assert!(!Agent::is_conversational("implement pagination for the API"));
+        assert!(!Agent::is_conversational("fix the bug in session.rs"));
+        assert!(!Agent::is_conversational("add unit tests to agent/mod.rs"));
+        assert!(!Agent::is_conversational("refactor the auth module"));
+        assert!(!Agent::is_conversational("run cargo test and fix failures"));
+    }
+
+    #[test]
+    fn not_conversational_question_with_action() {
+        // "how do I implement X" → has action verb → task, not conversational
+        assert!(!Agent::is_conversational("how do I implement oauth login?"));
+        assert!(!Agent::is_conversational("can you explain and then fix this bug?"));
     }
 }
