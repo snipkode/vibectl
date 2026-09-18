@@ -333,11 +333,19 @@ impl App {
             let trail = if entry.is_dir { "/" } else { " " };
             self.input = format!("{before}@{}{trail}{after}", entry.label);
             self.cursor = before.chars().count() + 1 + entry.label.chars().count() + 1;
-            // Tag the file for context injection
-            if !entry.is_dir {
-                if !self.at_tagged.iter().any(|p| p == &entry.path) {
-                    self.at_tagged.push(entry.path);
+
+            // Tag file or all files inside directory for context injection.
+            if entry.is_dir {
+                // Enumerate source files in the directory (non-recursive for top-level,
+                // recursive for src/ style dirs — capped at 20 files to stay concise)
+                let tagged = collect_dir_files(&entry.path, 20);
+                for p in tagged {
+                    if !self.at_tagged.iter().any(|x| x == &p) {
+                        self.at_tagged.push(p);
+                    }
                 }
+            } else if !self.at_tagged.iter().any(|p| p == &entry.path) {
+                self.at_tagged.push(entry.path);
             }
         }
         self.at_visible = false;
@@ -373,23 +381,49 @@ impl App {
             return prompt.to_string();
         }
         let mut result = prompt.to_string();
-        result.push_str("\n\n---\nAttached file context:\n");
+        let count = self.at_tagged.len();
+        result.push_str(&format!(
+            "\n\n---\nAttached file context ({count} file{}):\n",
+            if count == 1 { "" } else { "s" }
+        ));
         for path in &self.at_tagged {
             let label = path
                 .strip_prefix(&self.session.cwd)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| path.display().to_string());
             result.push_str(&format!("\n### {}\n", label));
-            match std::fs::read_to_string(path) {
-                Ok(contents) => {
-                    result.push_str("```\n");
-                    result.push_str(&contents);
-                    if !contents.ends_with('\n') {
-                        result.push('\n');
+            if path.is_dir() {
+                // Should not happen (dirs are expanded in complete_at),
+                // but handle gracefully by listing files inside.
+                let files = collect_dir_files(path, 10);
+                result.push_str(&format!(
+                    "(directory — {} source files found)\n",
+                    files.len()
+                ));
+                for f in &files {
+                    if let Ok(contents) = std::fs::read_to_string(f) {
+                        let flabel = f
+                            .strip_prefix(&self.session.cwd)
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| f.display().to_string());
+                        result.push_str(&format!("#### {flabel}\n```\n"));
+                        result.push_str(&contents);
+                        if !contents.ends_with('\n') { result.push('\n'); }
+                        result.push_str("```\n");
                     }
-                    result.push_str("```\n");
                 }
-                Err(e) => result.push_str(&format!("(error reading file: {e})\n")),
+            } else {
+                match std::fs::read_to_string(path) {
+                    Ok(contents) => {
+                        result.push_str("```\n");
+                        result.push_str(&contents);
+                        if !contents.ends_with('\n') {
+                            result.push('\n');
+                        }
+                        result.push_str("```\n");
+                    }
+                    Err(e) => result.push_str(&format!("(error reading file: {e})\n")),
+                }
             }
         }
         result
@@ -642,6 +676,54 @@ pub fn scan_at_files(cwd: &std::path::Path, query: &str) -> Vec<AtEntry> {
     results.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.label.cmp(&b.label)));
     results.truncate(20);
     results
+}
+
+/// Collect source files inside a directory (recursive), capped at `max`.
+/// Skips target/, node_modules/, .git/, hidden files, and binary files.
+pub fn collect_dir_files(dir: &std::path::Path, max: usize) -> Vec<std::path::PathBuf> {
+    let source_exts = [
+        "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "kt",
+        "rb", "toml", "yaml", "yml", "json", "md", "sh", "sql",
+        "html", "css", "txt", "env",
+    ];
+    let skip_dirs = ["target", "node_modules", ".git", "dist", "build", "out", "__pycache__"];
+
+    let mut out = Vec::new();
+    collect_dir_recursive(dir, &source_exts, &skip_dirs, &mut out, max);
+    out
+}
+
+fn collect_dir_recursive(
+    dir: &std::path::Path,
+    source_exts: &[&str],
+    skip_dirs: &[&str],
+    out: &mut Vec<std::path::PathBuf>,
+    max: usize,
+) {
+    if out.len() >= max {
+        return;
+    }
+    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+        Err(_) => return,
+    };
+    entries.sort();
+    for p in entries {
+        if out.len() >= max {
+            return;
+        }
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') { continue; }
+        if p.is_dir() {
+            if skip_dirs.contains(&name) { continue; }
+            collect_dir_recursive(&p, source_exts, skip_dirs, out, max);
+        } else if p.is_file() {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if source_exts.contains(&ext) {
+                out.push(p);
+            }
+        }
+    }
 }
 
 /// ─── Char/byte index helpers ──────────────────────────────────────────────────
