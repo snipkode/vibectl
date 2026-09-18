@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod steer;
 
 use crate::tools::{Tool, ToolDef};
@@ -62,6 +63,9 @@ pub struct Agent {
     pub allow_any_path: bool,
     /// When true, complex tasks automatically trigger a planning phase before execution.
     pub auto_plan: bool,
+    /// Tracks whether a checkpoint stash has been created for the current run.
+    /// Reset to false by spawn_run so each run gets at most one checkpoint.
+    checkpoint_taken: Arc<Mutex<bool>>,
     messages: Arc<Mutex<Vec<Message>>>,
 }
 
@@ -86,6 +90,7 @@ impl Agent {
             approver: None,
             allow_any_path: false,
             auto_plan: true,
+            checkpoint_taken: Arc::new(Mutex::new(false)),
             messages: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -259,17 +264,31 @@ impl Agent {
         &self,
         user_input: String,
     ) -> (mpsc::Receiver<AgentEvent>, tokio::task::JoinHandle<()>) {
+        // Reset checkpoint flag — each run gets at most one auto-checkpoint.
+        *self.checkpoint_taken.lock().unwrap() = false;
+
+        // Use current timestamp as a simple unique run ID for the stash message.
+        let run_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
         let (tx, rx) = mpsc::channel(256);
         let this = self.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = this.run_inner(tx.clone(), user_input).await {
+            if let Err(e) = this.run_inner(tx.clone(), user_input, run_id).await {
                 let _ = tx.send(AgentEvent::Error(e.to_string())).await;
             }
         });
         (rx, handle)
     }
 
-    async fn run_inner(&self, tx: mpsc::Sender<AgentEvent>, user_input: String) -> Result<()> {
+    async fn run_inner(
+        &self,
+        tx: mpsc::Sender<AgentEvent>,
+        user_input: String,
+        run_id: u64,
+    ) -> Result<()> {
         // Token-aware trim: keep history within ~80k tokens (safe for 128k context models).
         // System prompt itself is injected separately and not counted here.
         self.trim_history_by_tokens(80_000).await;
@@ -375,7 +394,7 @@ impl Agent {
                     // Execute all in parallel.
                     let futures: Vec<_> = clean_calls
                         .iter()
-                        .map(|call| self.execute_tool(call))
+                        .map(|call| self.execute_tool(call, run_id, &tx))
                         .collect();
                     let results = futures::future::join_all(futures).await;
 
@@ -419,7 +438,7 @@ impl Agent {
                                 name: call.name.clone(),
                             })
                             .await;
-                        match self.execute_tool(call).await {
+                        match self.execute_tool(call, run_id, &tx).await {
                             Ok(res) => {
                                 self.push(Message::tool_result(
                                     call.id.clone(),
@@ -487,7 +506,52 @@ impl Agent {
         }
     }
 
-    async fn execute_tool(&self, call: &ToolCall) -> Result<crate::tools::ToolResult> {
+    /// Create a git stash checkpoint before the first file modification in this run.
+    /// Silently skips if: checkpoint already taken, no git repo, clean working tree.
+    /// Emits a system message via `tx` so the user knows a checkpoint was created.
+    async fn maybe_checkpoint(&self, run_id: u64, tx: &mpsc::Sender<AgentEvent>) {
+        let already_taken = {
+            let mut flag = self.checkpoint_taken.lock().unwrap();
+            if *flag {
+                return; // already done for this run
+            }
+            *flag = true;
+            false
+        };
+        let _ = already_taken; // used above
+
+        let root = crate::agent::steer::find_project_root(&self.cwd)
+            .unwrap_or_else(|| self.cwd.clone());
+
+        match checkpoint::create(run_id, &root) {
+            Ok(stash_ref) => {
+                let _ = tx
+                    .send(AgentEvent::Text(format!(
+                        "[checkpoint created: {stash_ref} — use /undo to rollback]\n"
+                    )))
+                    .await;
+            }
+            Err(e) => {
+                // Non-fatal: clean tree, no git, etc. Don't block the write.
+                let msg = e.to_string();
+                // Only surface non-trivial errors (skip "clean tree" noise).
+                if !msg.contains("clean") {
+                    let _ = tx
+                        .send(AgentEvent::Text(format!(
+                            "[checkpoint skipped: {msg}]\n"
+                        )))
+                        .await;
+                }
+            }
+        }
+    }
+
+    async fn execute_tool(
+        &self,
+        call: &ToolCall,
+        run_id: u64,
+        tx: &mpsc::Sender<AgentEvent>,
+    ) -> Result<crate::tools::ToolResult> {
         let name = call.name.clone();
         // Use cached tool_impls — no re-construction on every call.
         let tool = self
@@ -540,7 +604,6 @@ impl Agent {
                     .get("patch")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                // Show the raw patch as the diff preview — it already is a diff.
                 let preview: String = patch_str
                     .lines()
                     .take(40)
@@ -552,11 +615,7 @@ impl Agent {
                 } else {
                     String::new()
                 };
-                let mut desc = format!(
-                    "patch: {}\n{}{omit}",
-                    target.display(),
-                    preview
-                );
+                let mut desc = format!("patch: {}\n{}{omit}", target.display(), preview);
                 if outside {
                     desc = format!("OUTSIDE PROJECT: {desc}");
                 }
@@ -566,6 +625,9 @@ impl Agent {
                     });
                 }
             }
+
+            // Checkpoint before first write in this run.
+            self.maybe_checkpoint(run_id, tx).await;
             return tool.run(&args, &self.cwd);
         }
 
@@ -598,7 +660,6 @@ impl Agent {
                     .unwrap_or("");
                 let op = if target.exists() { "update" } else { "create" };
 
-                // Build diff preview for existing files.
                 let diff_section = if target.exists() {
                     match std::fs::read_to_string(&target) {
                         Ok(old) => {
@@ -608,7 +669,6 @@ impl Agent {
                         Err(_) => String::new(),
                     }
                 } else {
-                    // New file: show first 20 lines as preview.
                     let preview: String = new_content
                         .lines()
                         .take(20)
@@ -645,6 +705,9 @@ impl Agent {
                     });
                 }
             }
+
+            // Checkpoint before first write in this run.
+            self.maybe_checkpoint(run_id, tx).await;
             return tool.run(&args, &self.cwd);
         }
 

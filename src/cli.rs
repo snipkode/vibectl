@@ -49,4 +49,7 @@ pub enum Command {
         #[arg(long)]
         init_steering: bool,
     },
+    /// Rollback the last agent run by popping the most recent vibectl
+    /// git stash checkpoint.  Equivalent to typing /undo in the TUI.
+    Undo,
 }

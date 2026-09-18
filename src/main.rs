@@ -30,6 +30,17 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            Command::Undo => {
+                let root = agent::steer::find_project_root(&cwd).unwrap_or(cwd.clone());
+                match agent::checkpoint::undo(&root) {
+                    Ok(summary) => println!("{summary}"),
+                    Err(e) => {
+                        eprintln!("vibectl undo: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                return Ok(());
+            }
         }
     }
 

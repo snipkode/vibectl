@@ -463,6 +463,14 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
                 None => app.push_system("No plan found. Run /plan <task> first.".to_string()),
             }
         }
+        "/undo" => {
+            let cwd = app.session.cwd.clone();
+            let root = crate::agent::steer::find_project_root(&cwd).unwrap_or(cwd);
+            match crate::agent::checkpoint::undo(&root) {
+                Ok(summary) => app.push_system(format!("✓ {summary}")),
+                Err(e) => app.push_error(e.to_string()),
+            }
+        }
         "/steer" => {
             if rest.is_empty() {
                 app.push_system("usage: /steer <rule text>".to_string());

@@ -26,6 +26,7 @@ pub const HELP_TEXT: &str = "\
   ────────────────────────────────────────────────
   /model <name>  Switch model  e.g. /model gpt-4o
   /plan <task>   Generate a step-by-step plan
+  /undo          Rollback last agent file changes (git stash pop)
   /steer <text>  Append a rule to .vibectl/steer.md
   /new           Reset conversation history
   /spec          Show current plan
@@ -36,6 +37,7 @@ pub const HELP_TEXT: &str = "\
 
   Shell commands and file writes pause for approval.
   Writes outside the project root are refused.
+  A git stash checkpoint is created before the first write in each run.
 ";
 
 /// Wall-clock minutes since midnight, as HH:MM.
@@ -130,6 +132,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/model",    "Switch model",                     "/model <name>"),
     ("/plan",     "Generate implementation plan",     "/plan <task>"),
     ("/spec",     "Show current plan",                "/spec"),
+    ("/undo",     "Rollback last agent changes",      "/undo"),
     ("/steer",    "Append rule to steer.md",          "/steer <rule>"),
     ("/cfg",      "Print effective config",           "/cfg"),
     ("/provider", "Show provider + model info",       "/provider"),

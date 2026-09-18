@@ -204,6 +204,7 @@ Scans the repository and prints a structured report:
 |---------|--------|
 | `/model <name>` | Switch model |
 | `/plan <task>` | Generate implementation plan |
+| `/undo` | Rollback last agent file changes (git stash pop) |
 | `/steer <rule>` | Append rule to `.vibectl/steer.md` |
 | `/new` | Reset conversation history |
 | `/spec` | Show current plan |
