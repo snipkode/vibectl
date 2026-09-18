@@ -198,7 +198,16 @@ async fn handle_key(
         KeyCode::Esc => {
             if app.show_help {
                 app.show_help = false;
-            } else if !app.busy {
+            } else if app.busy {
+                // Esc while agent running = interrupt (same as Ctrl+C)
+                app.interrupt();
+                app.ctrl_c_count = 0;
+            } else if app.input.contains('\n') {
+                // Esc in multiline = collapse to single line (strip newlines)
+                let flat: String = app.input.chars().filter(|&c| c != '\n').collect();
+                app.cursor = app.cursor.min(flat.chars().count());
+                app.input = flat;
+            } else if !app.input.is_empty() {
                 app.input.clear();
                 app.cursor = 0;
             }
