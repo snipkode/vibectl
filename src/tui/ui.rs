@@ -387,15 +387,26 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // ── Split inner row into: [text_area] [icons_area] ────────────────────────
+    // ── Split inner row into: [pad] [text_area] [icons_area] [pad] ──────────
     //
-    //  icons:  "⊘ " (2) + " [/] " (5) + " [↵]" (4) = 11 chars + 1 pad = 12
-    //  We reserve 12 cols for icons on the right.
+    //  1 col left pad  +  text  +  icons (12)  +  1 col right pad
+    //  icons: "⊘ " (2) + " [/] " (5) + " [↵] " (5) = 12
+    let inner_pad: u16 = 1;
     let icons_w: u16 = 12;
-    let text_w   = inner.width.saturating_sub(icons_w);
+    let text_w = inner.width
+        .saturating_sub(icons_w)
+        .saturating_sub(inner_pad * 2);
 
-    let text_area  = Rect { width: text_w,   ..inner };
-    let icons_area = Rect { x: inner.x + text_w, width: icons_w, ..inner };
+    let text_area = Rect {
+        x: inner.x + inner_pad,
+        width: text_w,
+        ..inner
+    };
+    let icons_area = Rect {
+        x: inner.x + inner_pad + text_w,
+        width: icons_w,
+        ..inner
+    };
 
     // ── Build text content ────────────────────────────────────────────────────
     let (prompt_ch, prompt_col) = if app.busy { ("·", C_HINT) } else { ("❯", C_PROMPT) };
