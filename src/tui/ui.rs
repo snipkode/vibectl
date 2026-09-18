@@ -135,97 +135,172 @@ pub fn render(frame: &mut Frame, app: &App) {
 
 // ─── Header ───────────────────────────────────────────────────────────────────
 //
-//  Row 0:  ▌ vibectl  ·  provider · model · cwd          [spinner / hint]
-//  Row 1:  thin separator line
-//  Row 2:  (body starts)
+//  Full-width navbar, 2 rows:
+//
+//  Row 0:  ████████████████████████████████████████████████████████████████
+//          ◈ vibectl   │   provider · model   │   ~/cwd        [status]
+//          ████████████████████████████████████████████████████████████████
+//  Row 1:  ────────────────────────────────── (separator, full width)
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    // background fill
-    frame.render_widget(
-        Block::default().style(Style::default().bg(C_HDR_BG)),
-        area,
-    );
-
     if area.height < 1 {
         return;
     }
 
-    let total_w = area.width as usize;
+    let w = area.width;
 
-    // ── logo row (row 0) ─────────────────────────────────────────────────────
-    let logo_row = Rect { height: 1, ..area };
+    // ── Row 0: solid navbar bar ───────────────────────────────────────────────
+    let nav_row = Rect { height: 1, ..area };
 
-    // left: " ▌ vibectl  ·  provider  ·  model  ·  cwd"
-    let mut left: Vec<Span> = vec![
-        Span::raw(" "),
-        Span::styled("▌", Style::default().fg(C_HDR_LOGO).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
+    // Fill background
+    frame.render_widget(
+        Block::default().style(Style::default().bg(C_HDR_BG)),
+        nav_row,
+    );
+
+    // ── LEFT: logo pill ───────────────────────────────────────────────────────
+    //  " ◈ vibectl "
+    let logo_spans = vec![
+        Span::raw("  "),
         Span::styled(
-            "vibectl",
+            "◈",
             Style::default()
                 .fg(C_HDR_LOGO)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ·  ", Style::default().fg(C_HDR_SEP)),
-        Span::styled(app.session.provider_label.clone(), Style::default().fg(C_HDR_VAL)),
-        Span::styled("  ·  ", Style::default().fg(C_HDR_SEP)),
-        Span::styled(app.session.agent.model.clone(), Style::default().fg(C_HDR_VAL)),
-        Span::styled("  ·  ", Style::default().fg(C_HDR_SEP)),
+        Span::raw(" "),
         Span::styled(
-            app.session.cwd.display().to_string(),
-            Style::default().fg(C_HDR_META),
+            "vibectl",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
+        Span::raw("  "),
     ];
+    let logo_w: u16 = logo_spans.iter().map(|s| s.content.chars().count() as u16).sum();
 
-    // right: spinner state or idle hint
-    let right_str = if app.busy {
-        let sp = spinner_char(app);
-        if let Some(tool) = &app.running_tool {
-            format!("  {sp} {tool}  ")
-        } else {
-            format!("  {sp} thinking…  ")
-        }
-    } else {
-        if app.scroll_offset > 0 {
-            format!("  ↑{}  ? help  ", app.scroll_offset)
-        } else {
-            "  ? help  ".to_string()
-        }
-    };
-    let right_color = if app.busy { C_TOOL_MARK } else { C_HINT };
+    // ── RIGHT: status pill ────────────────────────────────────────────────────
+    //  idle:   "  ? help  "
+    //  busy:   "  ⠹ toolname  "  (amber)
+    //  scroll: "  ↑12  "
+    let (right_spans, right_w) = build_right_pill(app);
 
-    // measure left width to decide if right fits
-    let left_w: usize = left.iter().map(|s| s.content.chars().count()).sum();
-    let right_w = right_str.chars().count();
+    // ── CENTER: provider · model · cwd (fills between logo and right) ─────────
+    let center_w = w.saturating_sub(logo_w + right_w + 2);
+    let center_x = area.x + logo_w;
 
-    if left_w + right_w < total_w {
-        let pad = total_w.saturating_sub(left_w + right_w);
-        left.push(Span::raw(" ".repeat(pad)));
-        left.push(Span::styled(right_str, Style::default().fg(right_color)));
-    }
+    // build center content — truncate cwd to fit
+    let provider = &app.session.provider_label;
+    let model    = &app.session.agent.model;
+    let cwd_full = app.session.cwd.display().to_string();
+    // shorten cwd: only last 2 path components
+    let cwd_short = short_cwd(&cwd_full, center_w as usize);
 
+    let sep = Span::styled("  │  ", Style::default().fg(C_HDR_SEP));
+
+    let center_content = vec![
+        Span::styled(provider.clone(), Style::default().fg(C_HDR_VAL)),
+        Span::styled("  ·  ", Style::default().fg(C_HDR_SEP)),
+        Span::styled(model.clone(), Style::default().fg(C_HDR_VAL)),
+        sep.clone(),
+        Span::styled(cwd_short, Style::default().fg(C_HDR_META)),
+    ];
+    let content_w: u16 = center_content.iter().map(|s| s.content.chars().count() as u16).sum();
+
+    // pad center so it's truly centered
+    let left_pad = center_w.saturating_sub(content_w) / 2;
+
+    let mut center_spans = vec![Span::raw(" ".repeat(left_pad as usize))];
+    center_spans.extend(center_content);
+
+    // ── Render logo (left) ────────────────────────────────────────────────────
+    let logo_rect = Rect { x: area.x, y: area.y, width: logo_w, height: 1 };
     frame.render_widget(
-        Paragraph::new(Line::from(left)).style(Style::default().bg(C_HDR_BG)),
-        logo_row,
+        Paragraph::new(Line::from(logo_spans)).style(Style::default().bg(C_HDR_BG)),
+        logo_rect,
     );
 
-    // ── separator row (row 1) ────────────────────────────────────────────────
+    // ── Render center ─────────────────────────────────────────────────────────
+    let center_rect = Rect { x: center_x, y: area.y, width: center_w, height: 1 };
+    frame.render_widget(
+        Paragraph::new(Line::from(center_spans)).style(Style::default().bg(C_HDR_BG)),
+        center_rect,
+    );
+
+    // ── Render right pill ─────────────────────────────────────────────────────
+    let right_x = area.x + w.saturating_sub(right_w);
+    let right_rect = Rect { x: right_x, y: area.y, width: right_w, height: 1 };
+    frame.render_widget(
+        Paragraph::new(Line::from(right_spans)).style(Style::default().bg(C_HDR_BG)),
+        right_rect,
+    );
+
+    // ── Row 1: separator line ─────────────────────────────────────────────────
     if area.height >= 2 {
-        let sep_row = Rect {
-            y: area.y + 1,
-            height: 1,
-            ..area
-        };
-        let sep_line = "─".repeat(total_w);
+        let sep_row = Rect { y: area.y + 1, height: 1, ..area };
+        // gradient-ish: brighter under logo, dims toward right
+        let sep_char = "─";
+        let line = sep_char.repeat(w as usize);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                sep_line,
+                line,
                 Style::default().fg(C_BORDER),
             )))
             .style(Style::default().bg(C_HDR_BG)),
             sep_row,
         );
     }
+}
+
+fn build_right_pill(app: &App) -> (Vec<Span<'static>>, u16) {
+    let spans: Vec<Span> = if app.busy {
+        let sp = spinner_char(app);
+        let label = if let Some(tool) = &app.running_tool {
+            format!(" {sp}  {} ", tool)
+        } else {
+            format!(" {sp}  thinking… ")
+        };
+        let _w = label.chars().count() as u16 + 2;
+        vec![
+            Span::raw("  "),
+            Span::styled(label, Style::default().fg(C_TOOL_MARK)),
+        ]
+    } else {
+        let mut parts: Vec<Span> = vec![Span::raw("  ")];
+        if app.scroll_offset > 0 {
+            parts.push(Span::styled(
+                format!("↑{}  ", app.scroll_offset),
+                Style::default().fg(C_AGENT_MARK),
+            ));
+        }
+        parts.push(Span::styled(
+            "?  help  ",
+            Style::default().fg(C_HINT),
+        ));
+        parts
+    };
+    let total_w: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+    (spans, total_w)
+}
+
+fn short_cwd(cwd: &str, max_w: usize) -> String {
+    // Show ~/last/two/components, truncated if needed
+    let home = std::env::var("HOME").unwrap_or_default();
+    let display = if !home.is_empty() && cwd.starts_with(&home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd.to_string()
+    };
+
+    if display.chars().count() <= max_w {
+        return display;
+    }
+
+    // Take last N chars with leading "…"
+    let take = max_w.saturating_sub(1);
+    let chars: Vec<char> = display.chars().collect();
+    let start = chars.len().saturating_sub(take);
+    format!("…{}", chars[start..].iter().collect::<String>())
 }
 
 // ─── Chat body ────────────────────────────────────────────────────────────────
