@@ -16,6 +16,22 @@ use cli::{Cli, Command};
 async fn main() -> Result<()> {
     let args = Cli::parse();
 
+    // Install a panic hook that restores the terminal before printing the panic message.
+    // Without this, a panic leaves the terminal in raw mode with the cursor hidden.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::style::SetAttribute(crossterm::style::Attribute::Reset),
+            crossterm::style::ResetColor,
+            crossterm::event::DisableMouseCapture,
+            crossterm::cursor::Show,
+            crossterm::terminal::LeaveAlternateScreen,
+        );
+        original_hook(info);
+    }));
+
     let cwd = args.cwd.clone().unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });

@@ -103,14 +103,23 @@ pub async fn run(session: Session) -> Result<()> {
 
     let res = run_loop(&mut terminal, &msg_tx, &mut msg_rx, &mut app).await;
 
-    // Always restore terminal state, even if run_loop returned an error.
+    // Always restore terminal — even on error or panic.
+    // Order matters: reset attributes FIRST (while still on alternate screen),
+    // then leave alternate screen, then re-enable cursor.
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         io::stdout(),
+        // Reset all ANSI attributes (colors, bold, italic, dim, etc.)
+        crossterm::style::SetAttribute(crossterm::style::Attribute::Reset),
+        crossterm::style::ResetColor,
+        // Restore mouse, cursor, and switch back to normal screen buffer.
         event::DisableMouseCapture,
         crossterm::cursor::Show,
         crossterm::terminal::LeaveAlternateScreen,
     );
+    // Flush stdout to ensure all escape codes are sent before process exits.
+    use std::io::Write;
+    let _ = io::stdout().flush();
     res
 }
 
