@@ -62,6 +62,9 @@ pub async fn run(args: &Cli) -> Result<()> {
     let mut had_error = false;
     while let Some(ev) = stream.recv().await {
         match ev {
+            AgentEvent::Plan(plan) => {
+                println!("[auto-plan]\n{plan}\n");
+            }
             AgentEvent::Text(t) => {
                 print!("{t}");
                 std::io::stdout().flush()?;

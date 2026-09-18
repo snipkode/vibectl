@@ -24,6 +24,8 @@ pub trait Approver: Send + Sync {
 
 #[allow(dead_code)]
 pub enum AgentEvent {
+    /// Auto-generated plan emitted before execution for complex tasks.
+    Plan(String),
     Text(String),
     ToolCall {
         id: String,
@@ -58,6 +60,8 @@ pub struct Agent {
     pub cwd: PathBuf,
     pub approver: Option<Arc<dyn Approver>>,
     pub allow_any_path: bool,
+    /// When true, complex tasks automatically trigger a planning phase before execution.
+    pub auto_plan: bool,
     messages: Arc<Mutex<Vec<Message>>>,
 }
 
@@ -81,6 +85,7 @@ impl Agent {
             cwd,
             approver: None,
             allow_any_path: false,
+            auto_plan: true,
             messages: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -141,6 +146,62 @@ impl Agent {
         self.messages.lock().unwrap().clone()
     }
 
+    /// Score the complexity of a user prompt (0–10).
+    /// Returns a score ≥ PLAN_THRESHOLD if auto-planning should trigger.
+    pub fn complexity_score(input: &str) -> u8 {
+        let lower = input.to_lowercase();
+        let word_count = input.split_whitespace().count();
+
+        let mut score: u8 = 0;
+
+        // Long prompts are inherently more complex.
+        if word_count > 50 { score += 3; }
+        else if word_count > 25 { score += 2; }
+        else if word_count > 15 { score += 1; }
+
+        // Action verbs that imply multi-step work.
+        let complex_verbs = [
+            "implement", "refactor", "migrate", "redesign", "rewrite",
+            "add feature", "create", "build", "integrate", "setup",
+            "convert", "upgrade", "extract", "split", "merge",
+        ];
+        for verb in &complex_verbs {
+            if lower.contains(verb) { score += 2; break; }
+        }
+
+        // Multiple targets — multi-step connectors.
+        let connectors = ["and then", " and ", " then ", " also ", " plus ", " + "];
+        for conn in &connectors {
+            if lower.contains(conn) { score += 1; break; }
+        }
+
+        // File count hints — count total file-like tokens (word contains a dot + ext).
+        let file_token_count = input
+            .split_whitespace()
+            .filter(|w| {
+                let w = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '_');
+                let exts = [".rs", ".py", ".js", ".ts", ".go", ".toml", ".md", ".json", ".yaml"];
+                exts.iter().any(|e| w.ends_with(e))
+            })
+            .count();
+        if file_token_count >= 3 { score += 2; }
+        else if file_token_count >= 2 { score += 1; }
+
+        // "all files", "every file" hints.
+        if lower.contains("all files") || lower.contains("every file") { score += 2; }
+
+        // Explicit scope words.
+        let scope_words = ["across", "throughout", "everywhere", "all of", "entire"];
+        for w in &scope_words {
+            if lower.contains(w) { score += 1; break; }
+        }
+
+        score.min(10)
+    }
+
+    /// Complexity score threshold above which auto-planning triggers.
+    pub const PLAN_THRESHOLD: u8 = 3;
+
     pub async fn plan(&self, task: &str) -> Result<String> {
         let req = ChatRequest {
             model: self.model.clone(),
@@ -188,7 +249,10 @@ impl Agent {
 
     /// Tools that are safe to run in parallel (read-only, no side effects).
     fn is_readonly_tool(name: &str) -> bool {
-        matches!(name, "read_file" | "glob" | "grep" | "git" | "web_fetch")
+        matches!(
+            name,
+            "read_file" | "glob" | "grep" | "git" | "web_fetch" | "list_symbols"
+        )
     }
 
     pub fn spawn_run(
@@ -209,6 +273,41 @@ impl Agent {
         // Token-aware trim: keep history within ~80k tokens (safe for 128k context models).
         // System prompt itself is injected separately and not counted here.
         self.trim_history_by_tokens(80_000).await;
+
+        // ── Auto-planning phase ────────────────────────────────────────────────
+        // For complex tasks, generate a plan first and inject it into the context
+        // so the LLM executes with clear step-by-step guidance.
+        // Only runs on the first turn (history is empty before we push the user msg).
+        let is_first_turn = self.messages.lock().unwrap().is_empty();
+        if self.auto_plan
+            && is_first_turn
+            && Self::complexity_score(&user_input) >= Self::PLAN_THRESHOLD
+        {
+            match self.plan(&user_input).await {
+                Ok(plan) => {
+                    // Save to disk (best-effort).
+                    let _ = crate::agent::steer::save_plan(&self.cwd, &plan);
+                    // Emit plan event so TUI / headless can display it.
+                    let _ = tx.send(AgentEvent::Plan(plan.clone())).await;
+                    // Inject the plan as a system-level context message so the
+                    // agent executes step-by-step.
+                    self.push(Message::system(format!(
+                        "Auto-generated implementation plan for this task:\n\n{plan}\n\n\
+                         Execute the steps above. Use tools to inspect, then implement."
+                    )))
+                    .await;
+                }
+                Err(e) => {
+                    // Planning failure is non-fatal — log and continue.
+                    let _ = tx
+                        .send(AgentEvent::Text(format!(
+                            "[auto-plan failed: {e} — proceeding without plan]\n"
+                        )))
+                        .await;
+                }
+            }
+        }
+
         self.push(Message::user(user_input)).await;
 
         loop {
@@ -693,8 +792,45 @@ mod tests {
         assert!(Agent::is_readonly_tool("grep"));
         assert!(Agent::is_readonly_tool("git"));
         assert!(Agent::is_readonly_tool("web_fetch"));
+        assert!(Agent::is_readonly_tool("list_symbols"));
         assert!(!Agent::is_readonly_tool("shell_exec"));
         assert!(!Agent::is_readonly_tool("write_file"));
         assert!(!Agent::is_readonly_tool("patch_file"));
+    }
+
+    #[test]
+    fn complexity_simple_question() {
+        // Short, no action verbs → below threshold
+        assert!(Agent::complexity_score("what does this do?") < Agent::PLAN_THRESHOLD);
+        assert!(Agent::complexity_score("explain session.rs") < Agent::PLAN_THRESHOLD);
+    }
+
+    #[test]
+    fn complexity_complex_task() {
+        // Contains "implement" + multi-step connectors → above threshold
+        assert!(
+            Agent::complexity_score(
+                "implement pagination for the users API and then add tests for all endpoints"
+            ) >= Agent::PLAN_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn complexity_refactor() {
+        assert!(
+            Agent::complexity_score(
+                "refactor the entire auth module to use the new token system"
+            ) >= Agent::PLAN_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn complexity_multi_file() {
+        // Multiple file extensions → elevated score
+        assert!(
+            Agent::complexity_score(
+                "update config.rs, session.rs, and main.rs to support the new provider format"
+            ) >= Agent::PLAN_THRESHOLD
+        );
     }
 }

@@ -498,6 +498,7 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
     tokio::spawn(async move {
         while let Some(ev) = stream.recv().await {
             let msg = match ev {
+                AgentEvent::Plan(plan) => AppMsg::Plan(plan),
                 AgentEvent::Text(t) => AppMsg::Text(run_id, t),
                 AgentEvent::ToolCall { id: _, name } => AppMsg::ToolStart(run_id, name),
                 AgentEvent::ToolResult { name, content, .. } => AppMsg::ToolResult {
