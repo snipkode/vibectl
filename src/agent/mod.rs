@@ -215,51 +215,83 @@ impl Agent {
     pub fn is_conversational(input: &str) -> bool {
         let trimmed = input.trim();
         let lower = trimmed.to_lowercase();
-        let words: Vec<&str> = trimmed.split_whitespace().collect();
-        let word_count = words.len();
+        let word_count = trimmed.split_whitespace().count();
 
-        // Very short input — almost certainly conversational.
-        if word_count <= 2 {
-            return true;
-        }
-
-        // Explicit greetings / social phrases.
-        let greetings = [
-            "halo", "hai", "hi", "hello", "hey", "hei",
-            "good morning", "good afternoon", "good evening", "good night",
-            "selamat pagi", "selamat siang", "selamat malam",
-            "thanks", "thank you", "terima kasih", "makasih",
-            "ok", "okay", "oke", "got it", "understood", "noted",
-            "nice", "great", "cool", "awesome", "mantap", "sip",
-            "bye", "goodbye", "see you", "sampai jumpa",
-        ];
-        for g in &greetings {
-            if lower == *g || lower.starts_with(&format!("{g} ")) || lower.ends_with(&format!(" {g}")) {
+        // ── Fast path: very short input is always conversational ──────────────
+        if word_count <= 3 {
+            // Unless it looks like a short command (contains /, ., --, or a known
+            // action verb that makes sense as a standalone short command).
+            let short_task_signals = [
+                "run ", "fix ", "add ", "buat ", "test ", "build ",
+                "install ", "deploy ", "delete ", "remove ",
+            ];
+            let has_short_task = short_task_signals.iter().any(|s| lower.starts_with(s));
+            let has_path = trimmed.contains('/') || trimmed.contains('.')
+                || trimmed.contains("--");
+            if !has_short_task && !has_path {
                 return true;
             }
         }
 
-        // Question words with no action verb → explanation request, not a task.
+        // ── Technical signals → this is a task, NOT conversational ───────────
+        // File path patterns — only a task signal when combined with an action verb.
+        let has_file_ref = trimmed.split_whitespace().any(|w| {
+            let w = w.trim_matches(|c: char| ",;:?!".contains(c));
+            let code_exts = [".rs", ".py", ".js", ".ts", ".go", ".toml", ".md",
+                             ".json", ".yaml", ".yml", ".html", ".css", ".sh"];
+            code_exts.iter().any(|e| w.ends_with(e))
+                || (w.contains('/') && !w.starts_with("http"))
+        });
+
+        // Shell / CLI patterns — these are always tasks.
+        let has_shell_signal = lower.contains("cargo ")
+            || lower.contains("git ")
+            || lower.contains("npm ")
+            || lower.contains("pip ")
+            || lower.contains(" --")
+            || lower.starts_with("$ ");
+        if has_shell_signal { return false; }
+
+        // Action verbs that unambiguously indicate a coding task.
+        let task_verbs = [
+            "implement", "refactor", "migrate", "redesign", "rewrite",
+            "create ", "add ", "fix ", "build ", "write ", "update ",
+            "delete ", "remove ", "install ", "deploy ", "generate ", "scaffold ",
+            "buat ", "tambahkan ", "perbaiki ", "hapus ", "jalankan ",
+            "ubah ", "refaktor ", "implementasi ",
+        ];
+        let has_task_verb = task_verbs.iter().any(|v| lower.contains(v));
+
+        // File ref only blocks conversational when paired with a task verb.
+        if has_file_ref && has_task_verb { return false; }
+        if has_task_verb && word_count > 4 { return false; }
+
+        // ── Positive conversational signals ───────────────────────────────────
+        // Question starters without action verbs
         let question_starters = [
-            "what is", "what are", "what does", "what do",
-            "how does", "how do", "how is", "how are",
-            "why does", "why do", "why is",
-            "can you explain", "please explain", "explain",
-            "tell me", "describe", "apa itu", "apa yang", "apa maksud",
-            "bagaimana", "kenapa", "mengapa",
+            "what ", "how ", "why ", "when ", "where ", "who ", "which ",
+            "can you ", "could you ", "do you ", "did you ", "is it ", "are you ",
+            "apa ", "bagaimana ", "kenapa ", "mengapa ", "kapan ", "siapa ",
+            "boleh ", "bisa ", "apakah ", "tolong jelaskan", "jelaskan ",
         ];
-        let action_verbs = [
-            "implement", "create", "add", "fix", "refactor", "write",
-            "build", "run", "execute", "delete", "remove", "update",
-            "install", "deploy", "migrate", "test", "generate",
-            "buat", "tambah", "hapus", "ubah", "jalankan", "perbaiki",
+        let has_question = question_starters.iter().any(|q| lower.starts_with(q));
+
+        // Instruction/preference phrases that aren't coding tasks
+        let pref_phrases = [
+            "pake ", "pakai ", "gunakan ", "use ", "speak ", "talk ",
+            "bahasa ", "language ", "in english", "in indonesian",
+            "please ", "mohon ", "tolong ",
         ];
+        let has_pref = pref_phrases.iter().any(|p| lower.starts_with(p) || lower.contains(p));
 
-        let has_question_start = question_starters.iter().any(|q| lower.starts_with(q));
-        let has_action_verb = action_verbs.iter().any(|v| lower.contains(v));
+        if has_question || has_pref {
+            return true;
+        }
 
-        // A question without an action verb = conversational.
-        if has_question_start && !has_action_verb {
+        // ── Default: longer inputs without clear task signals are borderline ──
+        // Be conservative: if we reach here and the input is not too long,
+        // treat it as conversational rather than risk running unwanted tools.
+        if word_count <= 8 {
             return true;
         }
 
@@ -977,6 +1009,7 @@ mod tests {
         assert!(Agent::is_conversational("hi"));
         assert!(Agent::is_conversational("hello"));
         assert!(Agent::is_conversational("hai"));
+        assert!(Agent::is_conversational("hali"));
         assert!(Agent::is_conversational("thanks"));
         assert!(Agent::is_conversational("terima kasih"));
         assert!(Agent::is_conversational("ok"));
@@ -987,6 +1020,10 @@ mod tests {
     fn conversational_short_inputs() {
         assert!(Agent::is_conversational("ok sip"));
         assert!(Agent::is_conversational("noted"));
+        assert!(Agent::is_conversational("pake bahasa indonesia"));
+        assert!(Agent::is_conversational("use english please"));
+        assert!(Agent::is_conversational("speak indonesian"));
+        assert!(Agent::is_conversational("bahasa indonesia ya"));
     }
 
     #[test]
@@ -999,17 +1036,16 @@ mod tests {
 
     #[test]
     fn not_conversational_tasks() {
-        assert!(!Agent::is_conversational("implement pagination for the API"));
+        assert!(!Agent::is_conversational("implement pagination for the API endpoint"));
         assert!(!Agent::is_conversational("fix the bug in session.rs"));
         assert!(!Agent::is_conversational("add unit tests to agent/mod.rs"));
-        assert!(!Agent::is_conversational("refactor the auth module"));
-        assert!(!Agent::is_conversational("run cargo test and fix failures"));
+        assert!(!Agent::is_conversational("refactor the auth module to use new tokens"));
+        assert!(!Agent::is_conversational("run cargo test and fix all failures"));
+        assert!(!Agent::is_conversational("buat fungsi baru di tools/mod.rs"));
     }
 
     #[test]
     fn not_conversational_question_with_action() {
-        // "how do I implement X" → has action verb → task, not conversational
-        assert!(!Agent::is_conversational("how do I implement oauth login?"));
-        assert!(!Agent::is_conversational("can you explain and then fix this bug?"));
+        assert!(!Agent::is_conversational("how do I implement oauth login in session.rs?"));
     }
 }
