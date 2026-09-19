@@ -159,16 +159,26 @@ pub async fn run(args: &Cli) -> Result<()> {
                     validation_ctx.tracker = tracker.clone();
                     
                     // Check if project is ready for validation
-                    if crate::agent::validation::is_project_ready(&validation_ctx.workspace) {
+                    if crate::agent::validation::is_project_ready(&validation_ctx.workspace) 
+                        && validation_ctx.validation_enabled 
+                    {
                         println!("✓ Project ready for validation\n");
+                        println!("  Validation enabled: {}", validation_ctx.validation_enabled);
+                        println!("  Auto-fix enabled: {}\n", validation_ctx.auto_fix_enabled);
+                        
+                        // Use max_iterations from config
+                        if autonomous_config.auto_fix {
+                            println!("  Max iterations: {}\n", autonomous_config.max_iterations);
+                        }
                         
                         // Create a channel for validation events
                         let (tx, mut rx) = tokio::sync::mpsc::channel(256);
                         
                         // Spawn validation task
                         let agent_clone = session.agent.clone();
+                        let validation_ctx_clone = validation_ctx.clone();
                         let validation_handle = tokio::spawn(async move {
-                            agent_clone.run_autonomous_validation(&validation_ctx, &tx).await
+                            agent_clone.run_autonomous_validation(&validation_ctx_clone, &tx).await
                         });
                         
                         // Process validation events

@@ -436,7 +436,8 @@ async fn handle_key(
             app.ctrl_c_count = 0;
             app.show_help = !app.show_help;
         }
-        KeyCode::Char('?') => {
+        // ? — toggle help ONLY if input is empty (so user can type ? in messages)
+        KeyCode::Char('?') if app.input.is_empty() => {
             app.ctrl_c_count = 0;
             app.show_help = !app.show_help;
         }
