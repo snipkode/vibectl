@@ -459,7 +459,6 @@ async fn handle_key(
             if app.copy_mode {
                 return Ok(());
             }
-            }
             if app.at_visible {
                 app.at_next();
             } else if app.suggestion_visible {
