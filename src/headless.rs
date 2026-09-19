@@ -66,6 +66,23 @@ pub async fn run(args: &Cli) -> Result<()> {
         AutonomousConfig::interactive()
     };
 
+    // Also create a disabled config for comparison
+    let _disabled_config = AutonomousConfig::disabled();
+
+    // Log config status
+    if autonomous_config.is_enabled() {
+        println!("[autonomous] mode: {}", 
+            if args.dangerous_yes { "headless (full automation)" } 
+            else { "interactive (validation only)" }
+        );
+        println!("[autonomous] auto_validate: {}", autonomous_config.auto_validate);
+        println!("[autonomous] auto_fix: {}", autonomous_config.auto_fix);
+        println!("[autonomous] max_iterations: {}", autonomous_config.max_iterations);
+        println!("[autonomous] generate_reports: {}\n", autonomous_config.generate_reports);
+    } else {
+        println!("[autonomous] disabled\n");
+    }
+
     let mut autonomous_ctx = AutonomousContext::new(&cwd)?;
     autonomous_ctx.validation_enabled = autonomous_config.auto_validate;
     autonomous_ctx.auto_fix_enabled = autonomous_config.auto_fix;
@@ -101,24 +118,27 @@ pub async fn run(args: &Cli) -> Result<()> {
             AgentEvent::ToolResult { name, content, id } => {
                 println!("[tool: {name}] (id: {id})");
                 
-                // Track file operations
-                if name == "write_file" {
+                // Track file operations using context helper
+                if name == "write_file" || name == "create_dir" {
+                    // Parse JSON args to extract path properly
+                    if let Some(args_str) = content.lines()
+                        .find(|l| l.contains("arguments") || l.contains("path"))
+                    {
+                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
+                            if let Some(path) = autonomous_ctx.extract_path(&args) {
+                                let existed = autonomous_ctx.file_exists_at(&path);
+                                tracker.track_write(&path, existed);
+                            }
+                        }
+                    }
+                    
+                    // Fallback: extract from content
                     if let Some(path) = content.lines()
                         .find(|l| l.contains("Created") || l.contains("update"))
                         .and_then(|l| l.split_whitespace().last())
                     {
-                        let existed = content.contains("update");
+                        let existed = content.contains("update") || autonomous_ctx.file_exists_at(path);
                         tracker.track_write(path, existed);
-                    }
-                }
-                
-                if name == "create_dir" {
-                    if let Some(path) = content.lines()
-                        .find(|l| l.contains("Created directory"))
-                        .and_then(|l| l.split(':').nth(1))
-                        .map(|s| s.trim())
-                    {
-                        tracker.track_write(path, false);
                     }
                 }
                 
@@ -150,6 +170,13 @@ pub async fn run(args: &Cli) -> Result<()> {
                 );
                 
                 if autonomous_config.auto_validate && should_validate && tracker.has_changes() {
+                    // Also check using context's validation check
+                    let validation_ctx_check = autonomous_ctx.clone();
+                    if !validation_ctx_check.should_run_validation() {
+                        println!("⚠️  Validation check indicates not ready, skipping...\n");
+                        continue;
+                    }
+                    
                     // Print validation trigger message
                     let trigger_msg = crate::agent::autonomous::format_validation_trigger_message(&tracker);
                     print!("{}", trigger_msg);
@@ -211,7 +238,8 @@ pub async fn run(args: &Cli) -> Result<()> {
                                 }
                                 
                                 // Check if validation succeeded
-                                if report.status != crate::agent::report::ImplementationStatus::Completed {
+                                use crate::agent::report::ImplementationStatus;
+                                if report.status != ImplementationStatus::Completed {
                                     had_error = true;
                                 }
                             }

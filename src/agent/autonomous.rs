@@ -71,7 +71,17 @@ impl AutonomousContext {
     pub fn should_run_validation(&self) -> bool {
         self.validation_enabled 
             && self.tracker.has_changes()
-            && self.workspace.is_existing
+            && (self.workspace.is_existing || !self.workspace.manifest_files.is_empty())
+    }
+
+    /// Helper to check if file exists using Agent utility
+    pub fn file_exists_at(&self, path: &str) -> bool {
+        Agent::file_exists(&self.workspace.root, path)
+    }
+
+    /// Extract path from tool arguments using Agent utility
+    pub fn extract_path(&self, args: &serde_json::Value) -> Option<String> {
+        Agent::extract_path_from_args(args)
     }
 }
 
@@ -252,7 +262,7 @@ impl AutonomousConfig {
         }
     }
 
-    /// Disable all autonomous features
+    /// Disable all autonomous features (useful for testing)
     pub fn disabled() -> Self {
         Self {
             auto_validate: false,
@@ -260,6 +270,11 @@ impl AutonomousConfig {
             max_iterations: 0,
             generate_reports: false,
         }
+    }
+
+    /// Check if this config has autonomous features enabled
+    pub fn is_enabled(&self) -> bool {
+        self.auto_validate || self.auto_fix
     }
 }
 
