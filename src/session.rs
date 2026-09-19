@@ -1,7 +1,7 @@
 use crate::agent::Agent;
 use crate::agent::steer;
 use crate::config::Config;
-use crate::llm::{provider_name, resolve_provider};
+use crate::llm::resolve_provider;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -52,7 +52,7 @@ impl Session {
 
         let provider = resolve_provider(&cfg.providers, &model)
             .with_context(|| format!("failed to resolve provider for model {model}"))?;
-        let label = provider_name(&cfg.providers, &model);
+        let label = provider.name().to_string();
 
         let steering = steer::load_steering(&cwd);
         let mut agent = Agent::new(
@@ -75,7 +75,7 @@ impl Session {
     pub fn set_model(&mut self, model: String) -> Result<()> {
         let provider = resolve_provider(&self.config.providers, &model)
             .with_context(|| format!("failed to resolve provider for model {model}"))?;
-        self.provider_label = provider_name(&self.config.providers, &model);
+        self.provider_label = provider.name().to_string();
         self.agent.model = model;
         self.agent.provider = provider;
         Ok(())

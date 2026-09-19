@@ -80,23 +80,3 @@ pub fn resolve_provider(cfg: &ProviderConfig, model: &str) -> Result<Arc<dyn Pro
         .unwrap_or_else(|| "http://localhost:11434".to_string());
     Ok(Ollama::provider(base))
 }
-
-pub fn provider_name(cfg: &ProviderConfig, model: &str) -> String {
-    if model.starts_with("claude") {
-        "anthropic".to_string()
-    } else if model.starts_with("gpt") {
-        "openai".to_string()
-    } else if cfg
-        .custom_providers
-        .iter()
-        .any(|p| p.models.contains(&model.to_string()))
-    {
-        cfg.custom_providers
-            .iter()
-            .find(|p| p.models.contains(&model.to_string()))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "ollama".to_string())
-    } else {
-        "ollama".to_string()
-    }
-}
