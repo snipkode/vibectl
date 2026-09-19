@@ -41,6 +41,7 @@ pub enum AppMsg {
     Done(u64),
     Error(u64, String),
     Plan(String),
+    Implementation(String),
     ApprovalRequested(String, oneshot::Sender<bool>),
     /// Graceful exit — cleanup terminal then quit.
     #[allow(dead_code)]
@@ -189,6 +190,9 @@ async fn handle_app_msg(msg_tx: &mpsc::Sender<Msg>, app: &mut App, msg: AppMsg) 
             app.finish_run(None);
             app.push_plan(p);
         }
+        AppMsg::Implementation(s) => {
+            app.push_implement(s);
+        }
         AppMsg::ApprovalRequested(cmd, otx) => {
             app.pending_approval = Some(cmd);
             app.pending_approval_tx = Some(otx);
@@ -225,6 +229,32 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
         MouseEventKind::ScrollUp => app.scroll_up(3),
         MouseEventKind::ScrollDown => app.scroll_down(3),
         _ => {}
+    }
+}
+
+/// Toggle "copy mode": disables mouse capture (wheel scrolling off) so the
+/// user can select and copy terminal text with the mouse (or Shift+drag).
+fn set_copy_mode(app: &mut App, on: bool) {
+    if app.copy_mode == on {
+        return;
+    }
+    app.copy_mode = on;
+    let result = if on {
+        crossterm::execute!(io::stdout(), event::DisableMouseCapture)
+    } else {
+        crossterm::execute!(io::stdout(), event::EnableMouseCapture)
+    };
+    if result.is_err() {
+        app.push_error("failed to toggle copy mode".to_string());
+        return;
+    }
+    if on {
+        app.push_system(
+            "Copy mode ON — select text with the mouse. PgUp/PgDn scroll. Alt+C or /copy to return."
+                .to_string(),
+        );
+    } else {
+        app.push_system("Copy mode OFF — mouse scrolling restored.".to_string());
     }
 }
 
@@ -396,6 +426,11 @@ async fn handle_key(
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.follow_bottom();
         }
+        // Alt+C — toggle copy mode (disable mouse capture so text can be selected)
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.ctrl_c_count = 0;
+            set_copy_mode(app, !app.copy_mode);
+        }
         // Ctrl+K — toggle help (shown in hint bar)
         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.ctrl_c_count = 0;
@@ -485,6 +520,7 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
 
     match name.as_str() {
         "/help" | "/?" => app.show_help = !app.show_help,
+        "/copy" => set_copy_mode(app, !app.copy_mode),
         "/quit" | "/exit" => {
             app.should_quit = true;
         }
@@ -601,6 +637,7 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
         while let Some(ev) = stream.recv().await {
             let msg = match ev {
                 AgentEvent::Plan(plan) => AppMsg::Plan(plan),
+                AgentEvent::Implementation(s) => AppMsg::Implementation(s),
                 AgentEvent::Text(t) => AppMsg::Text(run_id, t),
                 AgentEvent::ToolCall { id: _, name } => AppMsg::ToolStart(run_id, name),
                 AgentEvent::ToolResult { name, content, .. } => AppMsg::ToolResult {

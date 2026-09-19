@@ -65,6 +65,9 @@ pub async fn run(args: &Cli) -> Result<()> {
             AgentEvent::Plan(plan) => {
                 println!("[auto-plan]\n{plan}\n");
             }
+            AgentEvent::Implementation(s) => {
+                println!("[implementation summary]\n{s}");
+            }
             AgentEvent::Text(t) => {
                 print!("{t}");
                 std::io::stdout().flush()?;

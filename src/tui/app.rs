@@ -21,7 +21,8 @@ pub const HELP_TEXT: &str = "\
   ────────────────────────────────────────────────
   ↑ / ↓          Input history
   PgUp / PgDn    Scroll conversation
-  Scroll wheel   Scroll conversation
+  Scroll wheel   Scroll conversation (mouse capture on)
+  Alt+C or /copy Toggle copy mode (select/copy text with mouse)
   Ctrl+L         Jump to latest message
   Esc            Close help / cancel
 
@@ -114,6 +115,14 @@ impl MessageItem {
             ..Self::new(MsgRole::Plan, text)
         }
     }
+    /// Grouped summary of files the agent intends to create/update,
+    /// shown as a "Implementation" bubble before the confirm prompt.
+    pub fn implement(text: String) -> Self {
+        Self {
+            kind: Some("Implementation".into()),
+            ..Self::new(MsgRole::Plan, text)
+        }
+    }
 }
 
 /// Entry in the @ file dropdown.
@@ -139,6 +148,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/steer", "Append rule to steer.md", "/steer <rule>"),
     ("/cfg", "Print effective config", "/cfg"),
     ("/provider", "Show provider + model info", "/provider"),
+    ("/copy", "Toggle copy mode (mouse selection)", "/copy"),
     ("/quit", "Exit vibectl", "/quit"),
 ];
 
@@ -181,6 +191,8 @@ pub struct App {
     /// Messages typed while the agent is busy — delivered one at a time
     /// after the current run finishes.
     pub queued_input: Vec<String>,
+    /// When true, mouse capture is off so terminal text can be selected/copied.
+    pub copy_mode: bool,
     /// Set to true to trigger graceful exit after terminal cleanup.
     pub should_quit: bool,
 }
@@ -220,6 +232,7 @@ impl App {
             at_query: String::new(),
             at_tagged: vec![],
             queued_input: vec![],
+            copy_mode: false,
             should_quit: false,
         }
     }
@@ -565,6 +578,10 @@ impl App {
 
     pub fn push_plan(&mut self, text: String) {
         self.messages.push(MessageItem::plan(text));
+    }
+
+    pub fn push_implement(&mut self, text: String) {
+        self.messages.push(MessageItem::implement(text));
     }
 
     pub fn begin_run(&mut self) {

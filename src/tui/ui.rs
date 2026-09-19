@@ -572,7 +572,19 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     // ── Hint bar (row 3, outside box) ─────────────────────────────────────────
-    let hint_line: Line = if app.busy {
+    let hint_line: Line = if app.copy_mode {
+        Line::from(vec![
+            Span::styled(
+                "  COPY MODE — select text ",
+                Style::default().fg(C_AGENT_MARK).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("· ", Style::default().fg(C_BORDER)),
+            Span::styled("PgUp/PgDn scroll ", Style::default().fg(C_HINT)),
+            Span::styled("· ", Style::default().fg(C_BORDER)),
+            Span::styled("Alt+C or /copy ", Style::default().fg(C_HINT)),
+            Span::styled("to exit", Style::default().fg(C_HINT)),
+        ])
+    } else if app.busy {
         let mut spans = vec![
             Span::styled(
                 format!("  {} working… ", spinner_char(app)),
@@ -603,8 +615,8 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("  ·  ", Style::default().fg(C_BORDER)),
             Span::styled("Ctrl+K", Style::default().fg(C_HINT)),
             Span::styled("  ·  ", Style::default().fg(C_BORDER)),
-            Span::styled("↑↓", Style::default().fg(C_HINT)),
-            Span::styled("  history", Style::default().fg(C_HINT)),
+            Span::styled("Alt+C", Style::default().fg(C_HINT)),
+            Span::styled("  copy", Style::default().fg(C_HINT)),
         ])
     };
 
@@ -880,8 +892,20 @@ fn render_approval_modal(frame: &mut Frame, app: &App) {
     };
 
     let area = frame.area();
-    let modal_w = (area.width.min(78)).max(44);
-    let modal_h: u16 = 7;
+    let modal_w = (area.width.min(84)).max(44);
+    let inner_w = modal_w.saturating_sub(4) as usize; // borders + 1 col pad per side
+
+    // Body lines, capped; height grows with content (scaffold summaries/diffs).
+    let raw_lines: Vec<String> = cmd.lines().map(|l| l.to_string()).collect();
+    let max_body = 18usize;
+    let wrapped_body: usize = raw_lines
+        .iter()
+        .take(max_body)
+        .map(|l| (l.chars().count().saturating_add(inner_w - 2)).div_ceil(inner_w.saturating_sub(2)))
+        .sum();
+    let body_h = wrapped_body.min(20);
+
+    let modal_h: u16 = ((body_h as u16) + 3).clamp(8, 30).min(area.height.saturating_sub(2));
     let modal = Rect {
         x: area.width.saturating_sub(modal_w) / 2,
         y: area.height.saturating_sub(modal_h) / 2,
@@ -906,43 +930,46 @@ fn render_approval_modal(frame: &mut Frame, app: &App) {
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
 
-    let max_cmd_w = inner.width as usize - 2;
-    let truncated: String = if cmd.chars().count() > max_cmd_w {
-        format!("{}…", cmd.chars().take(max_cmd_w - 1).collect::<String>())
-    } else {
-        cmd.clone()
-    };
+    // body (fills) + footer (1 row, always visible)
+    let [body_rect, footer_rect] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
-    let lines = vec![
-        Line::raw(""),
-        Line::from(Span::styled(
-            format!("  {truncated}"),
+    let omitted = raw_lines.len().saturating_sub(max_body);
+    let mut body_lines: Vec<Line> = Vec::new();
+    for raw in raw_lines.iter().take(max_body) {
+        body_lines.push(Line::from(Span::styled(
+            format!("  {raw}"),
             Style::default().fg(Color::White),
-        )),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(
-                "  [y] ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Allow    ", Style::default().fg(C_HDR_META)),
-            Span::styled(
-                "[n] ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Deny    ", Style::default().fg(C_HDR_META)),
-            Span::styled("[Esc] ", Style::default().fg(C_HINT)),
-            Span::styled("Cancel", Style::default().fg(C_HINT)),
-        ]),
-    ];
+        )));
+    }
+    if omitted > 0 {
+        body_lines.push(Line::from(Span::styled(
+            format!("  … (+{omitted} more lines — scroll to view in chat)"),
+            Style::default().fg(C_HINT),
+        )));
+    }
 
     frame.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(body_lines)
             .wrap(Wrap { trim: false })
             .style(Style::default().bg(C_SURFACE2)),
-        inner,
+        body_rect,
+    );
+
+    let footer_line = Line::from(vec![
+        Span::styled(
+            "  [y] ",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Allow    ", Style::default().fg(C_HDR_META)),
+        Span::styled("[n] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::styled("Deny    ", Style::default().fg(C_HDR_META)),
+        Span::styled("[Esc] ", Style::default().fg(C_HINT)),
+        Span::styled("Cancel", Style::default().fg(C_HINT)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(footer_line).style(Style::default().bg(C_SURFACE2)),
+        footer_rect,
     );
 }
 
@@ -1119,7 +1146,8 @@ fn append_system(rows: &mut Vec<Line<'static>>, msg: &crate::tui::app::MessageIt
 }
 
 fn append_plan(rows: &mut Vec<Line<'static>>, msg: &crate::tui::app::MessageItem) {
-    rows.push(bubble_header(C_PLAN_MARK, "Plan", &msg.ts, 60));
+    let label = msg.kind.as_deref().unwrap_or("Plan");
+    rows.push(bubble_header(C_PLAN_MARK, label, &msg.ts, 60));
     let body_lines = markdown_to_lines(&msg.text, Style::default().fg(C_PLAN_TEXT));
     for line in body_lines {
         rows.push(bubble_line(C_PLAN_MARK, line.spans));
