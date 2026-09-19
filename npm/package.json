@@ -1,6 +1,6 @@
 {
   "name": "vibectl",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Autonomous coding agent - AI that writes, tests, and fixes code automatically",
   "main": "index.js",
   "bin": {
