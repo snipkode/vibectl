@@ -141,7 +141,7 @@ async fn run_loop(
             Msg::Tick => app.frame = app.frame.wrapping_add(1),
             Msg::Key(key) => handle_key(terminal, msg_tx, app, key).await?,
             Msg::Mouse(m) => handle_mouse(app, m),
-            Msg::App(m) => handle_app_msg(app, m).await,
+            Msg::App(m) => handle_app_msg(msg_tx, app, m).await,
         }
 
         if app.should_quit {
@@ -150,7 +150,7 @@ async fn run_loop(
     }
 }
 
-async fn handle_app_msg(app: &mut App, msg: AppMsg) {
+async fn handle_app_msg(msg_tx: &mpsc::Sender<Msg>, app: &mut App, msg: AppMsg) {
     match msg {
         AppMsg::Text(id, t) => {
             if id == app.run_id {
@@ -175,12 +175,14 @@ async fn handle_app_msg(app: &mut App, msg: AppMsg) {
         AppMsg::Done(id) => {
             if id == app.run_id {
                 app.finish_run(None);
+                drain_queue(msg_tx, app);
             }
         }
         AppMsg::Error(id, e) => {
             if id == app.run_id {
                 app.finish_run(None);
                 app.push_error(e);
+                drain_queue(msg_tx, app);
             }
         }
         AppMsg::Plan(p) => {
@@ -195,6 +197,27 @@ async fn handle_app_msg(app: &mut App, msg: AppMsg) {
             app.should_quit = true;
         }
     }
+}
+
+/// Deliver one queued message as a follow-up run once the agent is idle.
+fn spawn_drain_run(msg_tx: &mpsc::Sender<Msg>, app: &mut App) {
+    if app.busy || app.pending_approval.is_some() {
+        return;
+    }
+    if app.queued_input.is_empty() {
+        return;
+    }
+    let next = app.queued_input.remove(0);
+    let prompt = app.build_prompt_with_context(&next);
+    app.at_tagged.clear();
+    app.begin_run();
+    spawn_agent(msg_tx.clone(), app, prompt);
+}
+
+/// Deliver queued messages one at a time. Each run re-triggers via the next
+/// Done/Error event, so successive messages are processed as follow-up turns.
+fn drain_queue(msg_tx: &mpsc::Sender<Msg>, app: &mut App) {
+    spawn_drain_run(msg_tx, app);
 }
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
@@ -275,6 +298,13 @@ async fn handle_key(
                 if typed.trim_start().starts_with('/') {
                     let text = app.submit();
                     handle_command(msg_tx, app, &text).await;
+                } else if !typed.trim().is_empty() {
+                    // Queue a follow-up ask; delivered when the current run ends.
+                    let text = app.submit();
+                    let n = app.queue_input(text);
+                    app.push_system(format!(
+                        "Queued ({n} pending) — will send after this task."
+                    ));
                 }
                 return Ok(());
             }
@@ -419,7 +449,7 @@ async fn handle_key(
         KeyCode::PageDown => app.scroll_down(10),
         KeyCode::Char(c) => {
             app.ctrl_c_count = 0;
-            if c == '@' && !app.busy {
+            if c == '@' {
                 app.insert_char(c);
                 app.trigger_at();
                 // hide / command suggestions

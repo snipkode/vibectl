@@ -573,14 +573,22 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 
     // ── Hint bar (row 3, outside box) ─────────────────────────────────────────
     let hint_line: Line = if app.busy {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 format!("  {} working… ", spinner_char(app)),
                 Style::default().fg(C_TOOL_MARK),
             ),
             Span::styled("Ctrl+C ", Style::default().fg(C_ERROR_MARK)),
             Span::styled("to cancel", Style::default().fg(C_HINT)),
-        ])
+        ];
+        if !app.queued_input.is_empty() {
+            spans.push(Span::styled("  ·  ", Style::default().fg(C_BORDER)));
+            spans.push(Span::styled(
+                format!("⏷ {} queued", app.queued_input.len()),
+                Style::default().fg(C_AGENT_MARK),
+            ));
+        }
+        Line::from(spans)
     } else if app.input.chars().any(|c| c == '\n') {
         // multiline state
         Line::from(vec![

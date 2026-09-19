@@ -9,6 +9,7 @@ pub const HELP_TEXT: &str = "\
 
   Sending
   ────────────────────────────────────────────────
+  Send message while a task is running = queued, sent when it finishes
   Enter          Send message
   Shift+Enter    Insert newline
   Ctrl+Enter     Send multiline message
@@ -177,6 +178,9 @@ pub struct App {
     pub at_query: String,
     /// Tagged file paths that will be injected into the next prompt
     pub at_tagged: Vec<std::path::PathBuf>,
+    /// Messages typed while the agent is busy — delivered one at a time
+    /// after the current run finishes.
+    pub queued_input: Vec<String>,
     /// Set to true to trigger graceful exit after terminal cleanup.
     pub should_quit: bool,
 }
@@ -215,6 +219,7 @@ impl App {
             at_visible: false,
             at_query: String::new(),
             at_tagged: vec![],
+            queued_input: vec![],
             should_quit: false,
         }
     }
@@ -530,6 +535,15 @@ impl App {
 
     pub fn push_user(&mut self, text: String) {
         self.messages.push(MessageItem::user(text));
+    }
+
+    /// Queue a message asked while the agent is busy.
+    /// Shows it as a user bubble immediately; the agent receives it as a
+    /// follow-up turn once the current run ends. Returns the queue length.
+    pub fn queue_input(&mut self, text: String) -> usize {
+        self.push_user(text.clone());
+        self.queued_input.push(text);
+        self.queued_input.len()
     }
 
     #[allow(dead_code)]
