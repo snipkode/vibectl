@@ -648,12 +648,19 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
                 AgentEvent::Plan(plan) => AppMsg::Plan(plan),
                 AgentEvent::Implementation(s) => AppMsg::Implementation(s),
                 AgentEvent::Text(t) => {
-                    // Filter out JSON tool call patterns from text
-                    let filtered = filter_tool_call_json(&t);
-                    if filtered.trim().is_empty() {
-                        continue; // Skip empty text chunks
+                    // Pass whitespace-only chunks through untouched — some models
+                    // (Llama via Ollama) stream spaces as separate chunks, and a
+                    // trim() on the filter would drop them, gluing words together.
+                    if t.trim().is_empty() {
+                        AppMsg::Text(run_id, t)
+                    } else {
+                        // Filter out JSON tool call patterns from text.
+                        let filtered = filter_tool_call_json(&t);
+                        if filtered.is_empty() {
+                            continue; // Skip text that was entirely a tool call
+                        }
+                        AppMsg::Text(run_id, filtered)
                     }
-                    AppMsg::Text(run_id, filtered)
                 },
                 AgentEvent::ToolCall { id: _, name } => AppMsg::ToolStart(run_id, name),
                 AgentEvent::ToolResult { name, content, .. } => AppMsg::ToolResult {
@@ -694,10 +701,11 @@ fn filter_tool_call_json(text: &str) -> String {
     result = re.replace_all(&result, "").to_string();
     result = re_complex.replace_all(&result, "").to_string();
     
-    // Clean up multiple semicolons and extra whitespace left behind
+    // Clean up multiple semicolons and extra whitespace left behind.
+    // NOTE: do NOT trim() here — a trim() strips leading/trailing whitespace
+    // from each streamed chunk, and Llama-style tokenizers put the preceding
+    // space at the START of every word token. Trimming would glue words together.
     result = result.replace("};", "");
-    result = result.trim().to_string();
-    
     result
 }
 

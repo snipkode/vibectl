@@ -1161,17 +1161,18 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
     let mut in_code = false;
     let mut code_buf: Vec<String> = Vec::new();
     let mut lang = String::new();
+    let mut table_buf: Vec<String> = Vec::new();
 
     for src in md.lines() {
         let trimmed = src.trim();
 
-        if trimmed.starts_with("```") {
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             if in_code {
                 flush_code_block(&mut code_buf, &mut lines, &lang);
                 lang.clear();
                 in_code = false;
             } else {
-                lang = trimmed.trim_start_matches('`').to_string();
+                lang = trimmed.trim_start_matches(['`', '~']).to_string();
                 in_code = true;
             }
             continue;
@@ -1182,8 +1183,17 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
             continue;
         }
 
+        // Accumulate consecutive pipe-table rows, then render them as a block.
+        if is_table_line(trimmed) {
+            table_buf.push(trimmed.to_string());
+            continue;
+        }
+        flush_table(&mut table_buf, &mut lines, base);
+
         let line = if let Some(rest) = trimmed
-            .strip_prefix("### ")
+            .strip_prefix("##### ")
+            .or_else(|| trimmed.strip_prefix("#### "))
+            .or_else(|| trimmed.strip_prefix("### "))
             .or_else(|| trimmed.strip_prefix("## "))
             .or_else(|| trimmed.strip_prefix("# "))
         {
@@ -1210,9 +1220,26 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
         {
-            let mut inline = vec![Span::styled("• ", Style::default().fg(C_AGENT_MARK))];
-            inline.extend(parse_inline(rest, base));
+            let mut inline;
+            if let Some(item) = rest
+                .strip_prefix("[x] ")
+                .or_else(|| rest.strip_prefix("[X] "))
+            {
+                inline = vec![Span::styled(
+                    "☑ ",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )];
+                inline.extend(parse_inline(item, base));
+            } else if let Some(item) = rest.strip_prefix("[ ] ") {
+                inline = vec![Span::styled("☐ ", Style::default().fg(C_BORDER))];
+                inline.extend(parse_inline(item, base));
+            } else {
+                inline = vec![Span::styled("• ", Style::default().fg(C_AGENT_MARK))];
+                inline.extend(parse_inline(rest, base));
+            }
             Line::from(inline)
+        } else if trimmed.starts_with('[') {
+            markdown_inline(src, base)
         } else if trimmed
             .chars()
             .next()
@@ -1239,6 +1266,7 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
         lines.push(line);
     }
     flush_code_block(&mut code_buf, &mut lines, &lang);
+    flush_table(&mut table_buf, &mut lines, base);
 
     while lines
         .last()
@@ -1276,6 +1304,71 @@ fn flush_code_block(buf: &mut Vec<String>, lines: &mut Vec<Line<'static>>, lang:
     lines.push(Line::raw(""));
 }
 
+fn is_table_line(l: &str) -> bool {
+    l.contains('|') && l.matches('|').count() >= 2
+}
+
+fn is_table_separator_row(l: &str) -> bool {
+    let cells: Vec<&str> = l
+        .split('|')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            !c.is_empty()
+                && c.chars()
+                    .all(|ch| matches!(ch, '-' | ':' | ' '))
+                && c.contains('-')
+        })
+}
+
+fn split_table_cells(l: &str) -> Vec<String> {
+    l.split('|')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+fn flush_table(buf: &mut Vec<String>, lines: &mut Vec<Line<'static>>, base: Style) {
+    if buf.is_empty() {
+        return;
+    }
+    let rows: Vec<String> = buf.drain(..).collect();
+    for (i, row) in rows.iter().enumerate() {
+        if is_table_separator_row(row) {
+            lines.push(Line::from(Span::styled(
+                "│ ────────── │".to_string(),
+                Style::default().fg(C_BORDER_BRIGHT).add_modifier(Modifier::DIM),
+            )));
+            continue;
+        }
+        let cells = split_table_cells(row);
+        // The row right before a separator row is the table header.
+        let is_header = i + 1 < rows.len() && is_table_separator_row(&rows[i + 1]);
+        let cell_style = if is_header {
+            base.add_modifier(Modifier::BOLD)
+        } else {
+            base
+        };
+        let mut spans = vec![
+            Span::styled("│ ", Style::default().fg(C_BORDER_BRIGHT)),
+        ];
+        for (ci, cell) in cells.iter().enumerate() {
+            spans.push(Span::styled(cell.clone(), cell_style));
+            if ci < cells.len() - 1 {
+                spans.push(Span::styled(
+                    " │ ",
+                    Style::default().fg(C_BORDER_BRIGHT),
+                ));
+            }
+        }
+        spans.push(Span::styled(" │", Style::default().fg(C_BORDER_BRIGHT)));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::raw(""));
+}
+
 fn markdown_inline(src: &str, base: Style) -> Line<'static> {
     let spans = parse_inline(src, base);
     if spans.is_empty() {
@@ -1289,6 +1382,22 @@ fn parse_inline(src: &str, base: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = src;
     while !rest.is_empty() {
+        if rest.starts_with('[') {
+            if let Some(close) = rest.find(']') {
+                if let Some(url_rest) = rest[close + 1..].strip_prefix('(') {
+                    if let Some(paren) = url_rest.find(')') {
+                        let label = &rest[1..close];
+                        spans.push(Span::styled(
+                            label.to_string(),
+                            base.add_modifier(Modifier::UNDERLINED)
+                                .fg(C_HDR_LOGO),
+                        ));
+                        rest = &url_rest[paren + 1..];
+                        continue;
+                    }
+                }
+            }
+        }
         if rest.starts_with('`') {
             if let Some(i) = rest[1..].find('`') {
                 let end = i + 1;

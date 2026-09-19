@@ -983,8 +983,10 @@ fn should_filter_text_chunk(text: &str) -> bool {
         return true;
     }
     
-    // 3. Pure whitespace or just artifacts
-    if trimmed.is_empty() || trimmed == "};" || trimmed == "}" {
+    // 3. Just artifact tokens (leftover braces from streaming tool-call JSON).
+    //    NOTE: do NOT filter plain whitespace — some models (Llama via Ollama)
+    //    stream spaces as separate chunks; dropping them concatenates words.
+    if trimmed == "};" || trimmed == "}" {
         return true;
     }
     
