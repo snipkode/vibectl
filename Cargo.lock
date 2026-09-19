@@ -2898,6 +2898,7 @@ dependencies = [
  "futures",
  "glob",
  "ignore",
+ "lazy_static",
  "ratatui",
  "regex",
  "reqwest",

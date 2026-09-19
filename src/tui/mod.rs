@@ -250,7 +250,7 @@ fn set_copy_mode(app: &mut App, on: bool) {
     }
     if on {
         app.push_system(
-            "Copy mode ON — select text with the mouse. PgUp/PgDn scroll. Alt+C or /copy to return."
+            "Copy mode ON — select text with mouse or arrow keys. PgUp/PgDn to scroll. Alt+C or /copy to exit."
                 .to_string(),
         );
     } else {
@@ -442,6 +442,10 @@ async fn handle_key(
             app.show_help = !app.show_help;
         }
         KeyCode::Up => {
+            // In copy mode, let terminal handle arrow keys for text selection
+            if app.copy_mode {
+                return;
+            }
             if app.at_visible {
                 app.at_prev();
             } else if app.suggestion_visible {
@@ -451,6 +455,10 @@ async fn handle_key(
             }
         }
         KeyCode::Down => {
+            // In copy mode, let terminal handle arrow keys for text selection
+            if app.copy_mode {
+                return;
+            }
             if app.at_visible {
                 app.at_next();
             } else if app.suggestion_visible {
@@ -639,7 +647,14 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
             let msg = match ev {
                 AgentEvent::Plan(plan) => AppMsg::Plan(plan),
                 AgentEvent::Implementation(s) => AppMsg::Implementation(s),
-                AgentEvent::Text(t) => AppMsg::Text(run_id, t),
+                AgentEvent::Text(t) => {
+                    // Filter out JSON tool call patterns from text
+                    let filtered = filter_tool_call_json(&t);
+                    if filtered.trim().is_empty() {
+                        continue; // Skip empty text chunks
+                    }
+                    AppMsg::Text(run_id, filtered)
+                },
                 AgentEvent::ToolCall { id: _, name } => AppMsg::ToolStart(run_id, name),
                 AgentEvent::ToolResult { name, content, .. } => AppMsg::ToolResult {
                     run_id,
@@ -661,6 +676,29 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
             }
         }
     });
+}
+
+/// Filter out JSON tool call patterns from LLM text output.
+/// Some LLMs (e.g., Llama via Ollama) output tool calls as text instead of structured format.
+fn filter_tool_call_json(text: &str) -> String {
+    use regex::Regex;
+    
+    // Pattern: {"name":"...","parameters":{...}}
+    // This regex matches JSON objects with "name" and "parameters" keys
+    let re = Regex::new(r#"\{"name":"[^"]+","parameters":\{[^}]*\}\}"#).unwrap();
+    
+    // Also match variations with whitespace and escaped quotes
+    let re_complex = Regex::new(r#"\{[^}]*"name"[^}]*"parameters"[^}]*\}"#).unwrap();
+    
+    let mut result = text.to_string();
+    result = re.replace_all(&result, "").to_string();
+    result = re_complex.replace_all(&result, "").to_string();
+    
+    // Clean up multiple semicolons and extra whitespace left behind
+    result = result.replace("};", "");
+    result = result.trim().to_string();
+    
+    result
 }
 
 /// Extract the @ query from input: chars after the last '@' before the cursor.

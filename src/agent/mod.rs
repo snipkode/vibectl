@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::llm::provider::{ChatRequest, Message, Provider, ToolCall, ToolCallDelta};
+use regex::Regex;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Approval {
@@ -471,7 +472,10 @@ impl Agent {
                 let chunk = chunk.context("LLM stream error")?;
                 if let Some(c) = chunk.content {
                     text.push_str(&c);
-                    let _ = tx.send(AgentEvent::Text(c)).await;
+                    // Filter out JSON tool call patterns from being displayed to user
+                    if !should_filter_text_chunk(&c) {
+                        let _ = tx.send(AgentEvent::Text(c)).await;
+                    }
                 }
                 Self::merge_tool_deltas(&mut tool_slots, &chunk.tool_deltas);
                 if let Some(f) = chunk.finish_reason {
@@ -668,6 +672,7 @@ impl Agent {
                 "list_symbols",
                 "write_file",
                 "patch_file",
+                "create_dir",
             ],
             Refactor => &[
                 "read_file",
@@ -677,6 +682,7 @@ impl Agent {
                 "list_symbols",
                 "write_file",
                 "patch_file",
+                "create_dir",
             ],
             ShellExec => &[
                 "read_file",
@@ -685,6 +691,8 @@ impl Agent {
                 "git",
                 "list_symbols",
                 "shell_exec",
+                "run_command",
+                "run_tests",
             ],
             GitOp => &[
                 "read_file",
@@ -701,6 +709,8 @@ impl Agent {
                 "git",
                 "list_symbols",
                 "shell_exec",
+                "run_command",
+                "run_tests",
                 "web_fetch",
             ],
         };
@@ -946,6 +956,28 @@ impl Agent {
 
         tool.run(&args, &self.cwd)
     }
+}
+
+/// Filter out JSON tool call patterns from LLM text output.
+/// Some LLMs (e.g., Llama via Ollama) output tool calls as text instead of structured format.
+/// This prevents system execution details from appearing in user-facing chat.
+fn should_filter_text_chunk(text: &str) -> bool {
+    lazy_static::lazy_static! {
+        // Pattern 1: Simple JSON tool call: {"name":"...","parameters":{...}}
+        static ref RE_SIMPLE: Regex = Regex::new(
+            r#"\{"name"\s*:\s*"[^"]+"\s*,\s*"parameters"\s*:\s*\{[^\}]*\}\}"#
+        ).unwrap();
+        
+        // Pattern 2: More complex with nested braces and escaped quotes
+        static ref RE_COMPLEX: Regex = Regex::new(
+            r#"\{[^\}]*"name"[^\}]*"parameters"[^\}]*\}"#
+        ).unwrap();
+    }
+    
+    // Check if text looks like a JSON tool call
+    RE_SIMPLE.is_match(text) || RE_COMPLEX.is_match(text) || 
+    // Also filter pure whitespace or just "};" artifacts
+    text.trim().is_empty() || text.trim() == "};" || text.trim() == "}"
 }
 
 #[cfg(test)]
