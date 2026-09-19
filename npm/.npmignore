@@ -1,0 +1,30 @@
+# Don't publish these to npm
+node_modules/
+.DS_Store
+*.log
+.env
+.env.*
+
+# Source files (only publish built binaries)
+src/
+target/
+Cargo.toml
+Cargo.lock
+
+# Development files
+.git/
+.github/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test files
+test/
+tests/
+*.test.js
+
+# Documentation (use README.md in npm/)
+docs/
+REFACTORING_SUMMARY.md
+INTEGRATION_GUIDE.md

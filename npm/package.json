@@ -1,0 +1,52 @@
+{
+  "name": "vibectl",
+  "version": "0.1.0",
+  "description": "Autonomous coding agent - AI that writes, tests, and fixes code automatically",
+  "main": "index.js",
+  "bin": {
+    "vibectl": "./bin/vibectl.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/download-binary.js",
+    "test": "node test/version.test.js"
+  },
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "autonomous",
+    "llm",
+    "ollama",
+    "code-generation",
+    "testing",
+    "automation",
+    "rust"
+  ],
+  "author": "vibectl contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/snipkode/vibectl.git"
+  },
+  "homepage": "https://github.com/snipkode/vibectl#readme",
+  "bugs": {
+    "url": "https://github.com/snipkode/vibectl/issues"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ]
+}
