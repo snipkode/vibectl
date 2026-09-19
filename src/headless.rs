@@ -1,4 +1,5 @@
 use crate::agent::{AgentEvent, Approval, Approver};
+use crate::agent::autonomous::{AutonomousContext, AutonomousConfig, FileOperationTracker};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::session::Session;
@@ -30,7 +31,7 @@ pub async fn run(args: &Cli) -> Result<()> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let config = Config::load().context("failed to load config")?;
-    let mut session = Session::new(config, cwd, args.model.clone())?;
+    let mut session = Session::new(config, cwd.clone(), args.model.clone())?;
 
     let prompt = match &args.prompt {
         Some(p) => p.clone(),
@@ -58,8 +59,30 @@ pub async fn run(args: &Cli) -> Result<()> {
         return Ok(());
     }
 
+    // Initialize autonomous context with proper config
+    let autonomous_config = if args.dangerous_yes {
+        AutonomousConfig::headless()
+    } else {
+        AutonomousConfig::interactive()
+    };
+
+    let mut autonomous_ctx = AutonomousContext::new(&cwd)?;
+    autonomous_ctx.validation_enabled = autonomous_config.auto_validate;
+    autonomous_ctx.auto_fix_enabled = autonomous_config.auto_fix;
+
+    let mut tracker = FileOperationTracker::new();
+
+    // Classify user intent
+    let user_intent = crate::agent::intent::classify_intent(
+        &prompt,
+        &session.agent.model,
+        session.agent.provider.clone(),
+    )
+    .await;
+
     let mut stream = session.agent.spawn_run(prompt).0;
     let mut had_error = false;
+
     while let Some(ev) = stream.recv().await {
         match ev {
             AgentEvent::Plan(plan) => {
@@ -72,11 +95,46 @@ pub async fn run(args: &Cli) -> Result<()> {
                 print!("{t}");
                 std::io::stdout().flush()?;
             }
-            AgentEvent::ToolCall { name, .. } => {
-                println!("\n[tool] → {name}");
+            AgentEvent::ToolCall { name, id } => {
+                println!("\n[tool] → {name} (id: {id})");
             }
-            AgentEvent::ToolResult { name, content, .. } => {
-                println!("[tool: {name}]\n{content}");
+            AgentEvent::ToolResult { name, content, id } => {
+                println!("[tool: {name}] (id: {id})");
+                
+                // Track file operations
+                if name == "write_file" {
+                    if let Some(path) = content.lines()
+                        .find(|l| l.contains("Created") || l.contains("update"))
+                        .and_then(|l| l.split_whitespace().last())
+                    {
+                        let existed = content.contains("update");
+                        tracker.track_write(path, existed);
+                    }
+                }
+                
+                if name == "create_dir" {
+                    if let Some(path) = content.lines()
+                        .find(|l| l.contains("Created directory"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .map(|s| s.trim())
+                    {
+                        tracker.track_write(path, false);
+                    }
+                }
+                
+                // Track dependencies
+                if name == "run_command" && content.contains("install") {
+                    // Extract package names from install commands
+                    if content.contains("npm install") || content.contains("pip install") {
+                        for line in content.lines() {
+                            if line.contains("added") || line.contains("installed") {
+                                tracker.track_dependency(line);
+                            }
+                        }
+                    }
+                }
+                
+                println!("{content}");
             }
             AgentEvent::ToolError { name, error, .. } => {
                 eprintln!("[tool error: {name}] {error}");
@@ -84,6 +142,105 @@ pub async fn run(args: &Cli) -> Result<()> {
             }
             AgentEvent::Done { .. } => {
                 println!();
+                
+                // Check if autonomous validation should trigger
+                let should_validate = crate::agent::autonomous::should_trigger_validation(
+                    &user_intent,
+                    &tracker,
+                );
+                
+                if autonomous_config.auto_validate && should_validate && tracker.has_changes() {
+                    // Print validation trigger message
+                    let trigger_msg = crate::agent::autonomous::format_validation_trigger_message(&tracker);
+                    print!("{}", trigger_msg);
+                    
+                    // Update context with latest tracker
+                    let mut validation_ctx = autonomous_ctx.clone();
+                    validation_ctx.tracker = tracker.clone();
+                    
+                    // Check if project is ready for validation
+                    if crate::agent::validation::is_project_ready(&validation_ctx.workspace) {
+                        println!("✓ Project ready for validation\n");
+                        
+                        // Create a channel for validation events
+                        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+                        
+                        // Spawn validation task
+                        let agent_clone = session.agent.clone();
+                        let validation_handle = tokio::spawn(async move {
+                            agent_clone.run_autonomous_validation(&validation_ctx, &tx).await
+                        });
+                        
+                        // Process validation events
+                        let event_handle = tokio::spawn(async move {
+                            while let Some(event) = rx.recv().await {
+                                match event {
+                                    AgentEvent::Text(t) => {
+                                        print!("{}", t);
+                                        let _ = std::io::stdout().flush();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        });
+                        
+                        // Wait for validation to complete
+                        match validation_handle.await {
+                            Ok(Ok(report)) => {
+                                // Wait for event processing to finish
+                                let _ = event_handle.await;
+                                
+                                println!("\n{}", report.to_summary());
+                                
+                                // Save report if configured
+                                if autonomous_config.generate_reports {
+                                    let (save_tx, _save_rx) = tokio::sync::mpsc::channel(1);
+                                    if let Ok(path) = session.agent.save_implementation_report(&report, &save_tx).await {
+                                        println!("📄 Report saved to: {}", path.display());
+                                    }
+                                }
+                                
+                                // Check if validation succeeded
+                                if report.status != crate::agent::report::ImplementationStatus::Completed {
+                                    had_error = true;
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                eprintln!("❌ Validation failed: {}", e);
+                                had_error = true;
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Validation task panicked: {}", e);
+                                had_error = true;
+                            }
+                        }
+                    } else {
+                        println!("⚠️  Project not ready for validation (no manifest files found)\n");
+                        
+                        // Still generate a report
+                        let report = session.agent.build_implementation_report(&validation_ctx);
+                        println!("{}", report.to_summary());
+                        
+                        if autonomous_config.generate_reports {
+                            let (save_tx, _save_rx) = tokio::sync::mpsc::channel(1);
+                            if let Ok(path) = session.agent.save_implementation_report(&report, &save_tx).await {
+                                println!("📄 Report saved to: {}", path.display());
+                            }
+                        }
+                    }
+                } else if tracker.has_changes() {
+                    // Generate basic report even without validation
+                    let validation_ctx = autonomous_ctx.clone();
+                    let report = session.agent.build_implementation_report(&validation_ctx);
+                    
+                    if autonomous_config.generate_reports {
+                        println!("\n📊 Generating implementation report...\n");
+                        let (save_tx, _save_rx) = tokio::sync::mpsc::channel(1);
+                        if let Ok(path) = session.agent.save_implementation_report(&report, &save_tx).await {
+                            println!("📄 Report saved to: {}", path.display());
+                        }
+                    }
+                }
             }
             AgentEvent::Error(e) => {
                 eprintln!("\n[error] {e}");

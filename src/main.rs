@@ -7,6 +7,7 @@ mod llm;
 mod session;
 mod tools;
 mod tui;
+mod workspace;
 
 use anyhow::Result;
 use clap::Parser;

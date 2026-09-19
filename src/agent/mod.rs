@@ -1,6 +1,13 @@
+pub mod autonomous;
 pub mod checkpoint;
+pub mod executor;
 pub mod intent;
+pub mod report;
 pub mod steer;
+pub mod validation;
+
+// Re-export commonly used types
+pub use report::ImplementationStatus;
 
 use crate::tools::{Tool, ToolDef};
 use anyhow::{Context, Result};

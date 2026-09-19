@@ -1,3 +1,4 @@
+pub mod create_dir;
 pub mod git;
 pub mod patch_file;
 pub mod read_file;
@@ -46,6 +47,9 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(search::GlobFiles),
         Box::new(search::GrepFiles),
         Box::new(shell::ShellExec),
+        Box::new(shell::RunCommand),
+        Box::new(shell::RunTests),
+        Box::new(create_dir::CreateDir),
         Box::new(web::WebFetch),
     ]
 }
