@@ -444,7 +444,7 @@ async fn handle_key(
         KeyCode::Up => {
             // In copy mode, let terminal handle arrow keys for text selection
             if app.copy_mode {
-                return;
+                return Ok(());
             }
             if app.at_visible {
                 app.at_prev();
@@ -457,7 +457,8 @@ async fn handle_key(
         KeyCode::Down => {
             // In copy mode, let terminal handle arrow keys for text selection
             if app.copy_mode {
-                return;
+                return Ok(());
+            }
             }
             if app.at_visible {
                 app.at_next();

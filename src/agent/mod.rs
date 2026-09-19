@@ -963,21 +963,39 @@ impl Agent {
 /// This prevents system execution details from appearing in user-facing chat.
 fn should_filter_text_chunk(text: &str) -> bool {
     lazy_static::lazy_static! {
-        // Pattern 1: Simple JSON tool call: {"name":"...","parameters":{...}}
-        static ref RE_SIMPLE: Regex = Regex::new(
-            r#"\{"name"\s*:\s*"[^"]+"\s*,\s*"parameters"\s*:\s*\{[^\}]*\}\}"#
-        ).unwrap();
-        
-        // Pattern 2: More complex with nested braces and escaped quotes
-        static ref RE_COMPLEX: Regex = Regex::new(
-            r#"\{[^\}]*"name"[^\}]*"parameters"[^\}]*\}"#
+        // Pattern: Match JSON objects that contain both "name" and "parameters" keys
+        // This catches tool calls even with deeply nested content
+        static ref RE_TOOL_CALL: Regex = Regex::new(
+            r#"\{[^}]*"name"\s*:\s*"[^"]*"[^}]*"parameters"\s*:\s*\{.*?\}\s*\}"#
         ).unwrap();
     }
     
-    // Check if text looks like a JSON tool call
-    RE_SIMPLE.is_match(text) || RE_COMPLEX.is_match(text) || 
-    // Also filter pure whitespace or just "};" artifacts
-    text.trim().is_empty() || text.trim() == "};" || text.trim() == "}"
+    let trimmed = text.trim();
+    
+    // Filter if:
+    // 1. Contains JSON tool call pattern
+    if RE_TOOL_CALL.is_match(trimmed) {
+        return true;
+    }
+    
+    // 2. Starts with "}; {" - continuation of truncated tool calls
+    if trimmed.starts_with("};") && trimmed.contains(r#"{"name""#) {
+        return true;
+    }
+    
+    // 3. Pure whitespace or just artifacts
+    if trimmed.is_empty() || trimmed == "};" || trimmed == "}" {
+        return true;
+    }
+    
+    // 4. Looks like start of JSON object with "name" key
+    if (trimmed.starts_with('{') || trimmed.starts_with("}; {")) 
+        && trimmed.contains(r#""name""#) 
+        && trimmed.contains(r#""parameters""#) {
+        return true;
+    }
+    
+    false
 }
 
 #[cfg(test)]
