@@ -560,10 +560,20 @@ impl Agent {
                 }
             }
 
-            let clean_calls: Vec<ToolCall> = tool_slots
+            let mut clean_calls: Vec<ToolCall> = tool_slots
                 .into_iter()
                 .filter(|c| !c.name.is_empty())
                 .collect();
+
+            // ── Fallback: parse JSON tool calls from plain text ────────────────
+            // Some models (qwen2.5-coder:1.5b, llama3.2, etc.) output tool calls
+            // as JSON text instead of structured tool_calls. Parse and execute them.
+            if clean_calls.is_empty() && !text.trim().is_empty() {
+                let fallback = extract_tool_calls_from_text(&text, run_id);
+                if !fallback.is_empty() {
+                    clean_calls = fallback;
+                }
+            }
 
             // Safety guard: if the input was classified as conversational but
             // the model still emitted tool calls (e.g. older fine-tuned model),
@@ -1118,6 +1128,173 @@ impl Agent {
     }
 }
 
+/// Parse tool calls that a model emitted as plain-text JSON instead of structured
+/// tool_calls.  Handles several formats seen in the wild:
+///
+/// Format 1 — single object with "name"/"parameters":
+///   {"name": "write_file", "parameters": {"path": "index.js", "content": "..."}}
+///
+/// Format 2 — object with "type"/"function" (OpenAI schema echoed as text):
+///   {"type": "function", "function": {"name": "write_file", "arguments": {...}}}
+///
+/// Format 3 — array of either of the above.
+///
+/// Format 4 — fenced code block containing any of the above:
+///   ```json\n{"name": "write_file", ...}\n```
+///
+/// Returns an empty Vec when nothing parseable is found.
+fn extract_tool_calls_from_text(text: &str, run_id: u64) -> Vec<ToolCall> {
+    let mut results: Vec<ToolCall> = Vec::new();
+
+    // Strip fenced code blocks to get the inner content.
+    let candidates: Vec<&str> = {
+        let mut v = Vec::new();
+        // Whole text as a candidate.
+        v.push(text.trim());
+        // Extract from ```...``` fences.
+        let fence_re = Regex::new(r"```(?:json)?\s*([\s\S]*?)```").unwrap();
+        for cap in fence_re.captures_iter(text) {
+            if let Some(m) = cap.get(1) {
+                v.push(m.as_str().trim());
+            }
+        }
+        v
+    };
+
+    for candidate in candidates {
+        // Try parsing as JSON value.
+        let parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(candidate);
+        let value = match parsed {
+            Ok(v) => v,
+            Err(_) => {
+                // Try extracting individual JSON objects with a simple brace scanner.
+                for obj in extract_json_objects(candidate) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&obj) {
+                        if let Some(tc) = value_to_tool_call(&v, run_id, results.len()) {
+                            if !results.iter().any(|r: &ToolCall| r.name == tc.name) {
+                                results.push(tc);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        };
+
+        match &value {
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    if let Some(tc) = value_to_tool_call(item, run_id, results.len()) {
+                        if !results.iter().any(|r: &ToolCall| r.name == tc.name) {
+                            results.push(tc);
+                        }
+                    }
+                }
+            }
+            obj @ serde_json::Value::Object(_) => {
+                if let Some(tc) = value_to_tool_call(obj, run_id, results.len()) {
+                    if !results.iter().any(|r: &ToolCall| r.name == tc.name) {
+                        results.push(tc);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    results
+}
+
+/// Convert a JSON Value to a ToolCall if it matches a known tool-call schema.
+fn value_to_tool_call(
+    v: &serde_json::Value,
+    run_id: u64,
+    idx: usize,
+) -> Option<ToolCall> {
+    // Format 1: {"name": "...", "parameters": {...}}
+    // Format 1b: {"name": "...", "arguments": {...}}
+    if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+        let args = v
+            .get("parameters")
+            .or_else(|| v.get("arguments"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        let args_str = match &args {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        return Some(ToolCall {
+            id: format!("fallback_{run_id}_{idx}"),
+            name: name.to_string(),
+            arguments: args_str,
+        });
+    }
+
+    // Format 2: {"type": "function", "function": {"name": "...", "arguments": {...}}}
+    if v.get("type").and_then(|t| t.as_str()) == Some("function") {
+        if let Some(func) = v.get("function") {
+            if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                let args = func
+                    .get("arguments")
+                    .or_else(|| func.get("parameters"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                let args_str = match &args {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                return Some(ToolCall {
+                    id: format!("fallback_{run_id}_{idx}"),
+                    name: name.to_string(),
+                    arguments: args_str,
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract individual JSON objects from text by scanning balanced braces.
+/// Returns each balanced `{...}` substring found.
+fn extract_json_objects(text: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            let start = i;
+            let mut depth = 0i32;
+            let mut in_string = false;
+            let mut escaped = false;
+            let mut j = i;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' && in_string {
+                    escaped = true;
+                } else if b == b'"' {
+                    in_string = !in_string;
+                } else if !in_string {
+                    if b == b'{' { depth += 1; }
+                    else if b == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            results.push(text[start..=j].to_string());
+                            i = j;
+                            break;
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    results
+}
+
 /// Filter out JSON tool call patterns from LLM text output.
 /// Some LLMs (e.g., Llama via Ollama) output tool calls as text instead of structured format.
 /// This prevents system execution details from appearing in user-facing chat.
@@ -1447,6 +1624,69 @@ mod tests {
     }
 
     /// CASE 4: fallback id generation is non-empty and stable.
+    #[test]
+    fn fallback_parser_format1_name_parameters() {
+        let text = r#"{"name": "write_file", "parameters": {"path": "index.js", "content": "hello"}}"#;
+        let calls = extract_tool_calls_from_text(text, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(args["path"], "index.js");
+    }
+
+    #[test]
+    fn fallback_parser_format2_type_function() {
+        let text = r#"{"type": "function", "function": {"name": "read_file", "arguments": {"path": "src/main.rs"}}}"#;
+        let calls = extract_tool_calls_from_text(text, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn fallback_parser_array_of_calls() {
+        let text = r#"[
+            {"name": "create_dir", "parameters": {"path": "src"}},
+            {"name": "write_file", "parameters": {"path": "src/index.js", "content": "..."}}
+        ]"#;
+        let calls = extract_tool_calls_from_text(text, 1);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "create_dir");
+        assert_eq!(calls[1].name, "write_file");
+    }
+
+    #[test]
+    fn fallback_parser_fenced_code_block() {
+        let text = "Here is the tool call:\n```json\n{\"name\": \"glob\", \"parameters\": {\"pattern\": \"**/*.rs\"}}\n```";
+        let calls = extract_tool_calls_from_text(text, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "glob");
+    }
+
+    #[test]
+    fn fallback_parser_multiple_objects_in_text() {
+        let text = r#"{"name": "create_dir", "parameters": {"path": "src"}}{"name": "write_file", "parameters": {"path": "src/app.js", "content": ""}}"#;
+        let calls = extract_tool_calls_from_text(text, 1);
+        assert!(!calls.is_empty());
+        assert_eq!(calls[0].name, "create_dir");
+    }
+
+    #[test]
+    fn fallback_parser_no_match_returns_empty() {
+        let text = "Hello, how can I help you today?";
+        let calls = extract_tool_calls_from_text(text, 1);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn fallback_parser_deduplicates_same_tool() {
+        let text = r#"[
+            {"name": "write_file", "parameters": {"path": "a.js"}},
+            {"name": "write_file", "parameters": {"path": "a.js"}}
+        ]"#;
+        let calls = extract_tool_calls_from_text(text, 1);
+        assert_eq!(calls.len(), 1, "duplicate tool calls should be deduplicated");
+    }
+
     #[test]
     fn fallback_id_format() {
         let run_id: u64 = 1234567890;
