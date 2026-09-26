@@ -927,10 +927,11 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
                     if t.trim().is_empty() {
                         AppMsg::Text(run_id, t)
                     } else {
-                        // Filter out JSON tool call patterns from text.
+                        // Defence-in-depth: drop chunks that are entire tool-call
+                        // JSON objects in case a model bypasses the agent-loop filter.
                         let filtered = filter_tool_call_json(&t);
                         if filtered.is_empty() {
-                            continue; // Skip text that was entirely a tool call
+                            continue;
                         }
                         AppMsg::Text(run_id, filtered)
                     }
@@ -958,28 +959,79 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
     });
 }
 
-/// Filter out JSON tool call patterns from LLM text output.
-/// Some LLMs (e.g., Llama via Ollama) output tool calls as text instead of structured format.
+/// Last-resort filter for JSON tool call patterns that slip through the agent loop.
+///
+/// The agent loop (agent/mod.rs) is the primary suppression point: text is not
+/// streamed when structured tool deltas are present, and text that the fallback
+/// parser recognises as a tool call is cleared before being stored as a reply.
+/// This function is kept as defence-in-depth for edge cases (partial chunks,
+/// models that mix a small prose fragment with a tool call object, etc.).
+///
+/// The regex is intentionally narrow — only the two concrete formats the fallback
+/// parser accepts — to avoid false-positive matches that strip real user text.
 fn filter_tool_call_json(text: &str) -> String {
-    use regex::Regex;
+    // Format 1: {"name":"tool_name","parameters":{...}}
+    // Anchored to the full string so a JSON object embedded mid-sentence is
+    // preserved (the agent loop should have already caught it, but if a partial
+    // chunk slips through we don't want to mangle surrounding prose).
+    let trimmed = text.trim();
 
-    // Pattern: {"name":"...","parameters":{...}}
-    // This regex matches JSON objects with "name" and "parameters" keys
-    let re = Regex::new(r#"\{"name":"[^"]+","parameters":\{[^}]*\}\}"#).unwrap();
+    // If the entire chunk is a JSON tool-call object, drop it.
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let is_tool_call = v.get("name").and_then(|n| n.as_str()).is_some()
+                && (v.get("parameters").is_some() || v.get("arguments").is_some());
+            let is_function_wrap = v.get("type").and_then(|t| t.as_str()) == Some("function")
+                && v.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .is_some();
+            if is_tool_call || is_function_wrap {
+                return String::new();
+            }
+        }
+    }
 
-    // Also match variations with whitespace and escaped quotes
-    let re_complex = Regex::new(r#"\{[^}]*"name"[^}]*"parameters"[^}]*\}"#).unwrap();
+    // If the entire chunk is a JSON array of tool-call objects, drop it.
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if let Ok(serde_json::Value::Array(arr)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            let all_calls = arr.iter().all(|v| {
+                let is_tool_call = v.get("name").and_then(|n| n.as_str()).is_some()
+                    && (v.get("parameters").is_some() || v.get("arguments").is_some());
+                let is_function_wrap = v.get("type").and_then(|t| t.as_str()) == Some("function")
+                    && v.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .is_some();
+                is_tool_call || is_function_wrap
+            });
+            if all_calls && !arr.is_empty() {
+                return String::new();
+            }
+        }
+    }
 
-    let mut result = text.to_string();
-    result = re.replace_all(&result, "").to_string();
-    result = re_complex.replace_all(&result, "").to_string();
+    // Also filter lone artifact tokens left by streaming JSON fragmentation.
+    // NOTE: do NOT trim() the return value — a trim() strips leading/trailing
+    // whitespace from each streamed chunk, and Llama-style tokenizers put the
+    // preceding space at the START of every word token. Trimming would glue
+    // words together.
+    if trimmed == "};" || trimmed == "}" || trimmed == "}};" {
+        return String::new();
+    }
 
-    // Clean up multiple semicolons and extra whitespace left behind.
-    // NOTE: do NOT trim() here — a trim() strips leading/trailing whitespace
-    // from each streamed chunk, and Llama-style tokenizers put the preceding
-    // space at the START of every word token. Trimming would glue words together.
-    result = result.replace("};", "");
-    result
+    // Fallback: use a targeted regex only for the most obvious inline pattern.
+    // This avoids the previous over-broad regex that could eat legitimate text.
+    lazy_static::lazy_static! {
+        static ref RE_INLINE: regex::Regex = regex::Regex::new(
+            r#"\{"name"\s*:\s*"[^"]+"\s*,\s*"parameters"\s*:\s*\{[^{}]*\}\s*\}"#
+        ).unwrap();
+    }
+    let result = RE_INLINE.replace_all(text, "").to_string();
+    // Clean up leftover "};" separators.
+    result.replace("};", "")
 }
 
 /// Extract the @ query from input: chars after the last '@' before the cursor.

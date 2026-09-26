@@ -533,16 +533,24 @@ impl Agent {
             let mut text = String::new();
             let mut tool_slots: Vec<ToolCall> = Vec::new();
             let mut finish_reason: Option<String> = None;
+            // Text chunks buffered during streaming.
+            // We do NOT send text to the UI live because we cannot know whether the
+            // model is about to emit tool-call JSON until the stream is complete.
+            // Models that output tool calls as plain text (Ollama/local models) send
+            // the JSON as ordinary content chunks — streaming them live would render
+            // raw JSON in the chat bubble before we have a chance to parse & suppress.
+            //
+            // After the stream ends we decide:
+            //   • tool calls found   → discard buffered text (it was JSON, not prose)
+            //   • no tool calls      → flush buffered chunks to UI as the agent reply
+            let mut text_chunks: Vec<String> = Vec::new();
 
             let mut stream = stream;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.context("LLM stream error")?;
                 if let Some(c) = chunk.content {
                     text.push_str(&c);
-                    // Filter out JSON tool call patterns from being displayed to user
-                    if !should_filter_text_chunk(&c) {
-                        let _ = tx.send(AgentEvent::Text(c)).await;
-                    }
+                    text_chunks.push(c);
                 }
                 Self::merge_tool_deltas(&mut tool_slots, &chunk.tool_deltas);
                 if let Some(f) = chunk.finish_reason {
@@ -560,21 +568,51 @@ impl Agent {
                 }
             }
 
-            let mut clean_calls: Vec<ToolCall> = tool_slots
+            // Build the known tool name set once — used for both structured and
+            // text-fallback validation.
+            let known_names: std::collections::HashSet<String> = self
+                .tool_impls
+                .iter()
+                .map(|t| t.def().name.clone())
+                .collect();
+
+            // ── Validate structured tool_calls ────────────────────────────────
+            // Some providers echo back hallucinated tool names (e.g. "create_project")
+            // in the structured tool_calls field.  Reject unknown names so the model
+            // gets clear feedback instead of an opaque dispatch error.
+            let (structured_valid, structured_invalid): (Vec<_>, Vec<_>) = tool_slots
                 .into_iter()
                 .filter(|c| !c.name.is_empty())
-                .collect();
+                .partition(|c| known_names.contains(&c.name));
+
+            if !structured_invalid.is_empty() {
+                let names: Vec<&str> = structured_invalid.iter().map(|c| c.name.as_str()).collect();
+                let available: Vec<String> = {
+                    let mut v: Vec<String> = known_names.iter().cloned().collect();
+                    v.sort();
+                    v
+                };
+                let feedback = format!(
+                    "ERROR: Unknown tool(s): {}.\n\
+                     Available tools: {}.\n\
+                     Use ONLY the listed tool names. Do not invent new tool names.",
+                    names.join(", "),
+                    available.join(", ")
+                );
+                let _ = tx.send(AgentEvent::Text(format!("[tool error: {feedback}]\n"))).await;
+                self.push(Message::user(feedback)).await;
+            }
+
+            let mut clean_calls: Vec<ToolCall> = structured_valid;
 
             // ── Fallback: parse JSON tool calls from plain text ────────────────
             // Some models (qwen2.5-coder:1.5b, llama3.2, etc.) output tool calls
             // as JSON text instead of structured tool_calls. Parse and execute them.
-            // Only accept tool names that are actually registered — reject hallucinated tools.
+            // When this path triggers the text that was streamed must NOT be shown
+            // as a final answer — it is the raw tool call JSON.  We accomplish this
+            // by never streaming text when structured deltas were present (above),
+            // and here we clear any text that the model emitted purely as a tool call.
             if clean_calls.is_empty() && !text.trim().is_empty() {
-                let known_names: std::collections::HashSet<String> = self
-                    .tool_impls
-                    .iter()
-                    .map(|t| t.def().name.clone())
-                    .collect();
                 let parsed = extract_tool_calls_from_text(&text, run_id);
                 let (valid, invalid): (Vec<_>, Vec<_>) =
                     parsed.into_iter().partition(|c| known_names.contains(&c.name));
@@ -583,7 +621,7 @@ impl Agent {
                 if !invalid.is_empty() {
                     let names: Vec<&str> = invalid.iter().map(|c| c.name.as_str()).collect();
                     let available: Vec<String> = {
-                        let mut v: Vec<String> = known_names.into_iter().collect();
+                        let mut v: Vec<String> = known_names.iter().cloned().collect();
                         v.sort();
                         v
                     };
@@ -594,11 +632,14 @@ impl Agent {
                         names.join(", "),
                         available.join(", ")
                     );
-                    let _ = tx.send(AgentEvent::Text(format!("[tool error: {}]\n", feedback))).await;
+                    let _ = tx.send(AgentEvent::Text(format!("[tool error: {feedback}]\n"))).await;
                     self.push(Message::user(feedback)).await;
                 }
 
                 if !valid.is_empty() {
+                    // The text was a tool call JSON — clear it so it is not
+                    // stored in history as a plain assistant reply.
+                    text = String::new();
                     clean_calls = valid;
                 }
             }
@@ -607,7 +648,11 @@ impl Agent {
             // the model still emitted tool calls (e.g. older fine-tuned model),
             // discard them and treat the response as a plain text reply.
             if user_intent == intent::Intent::Conversational && !clean_calls.is_empty() {
-                self.push(Message::assistant(text)).await;
+                self.push(Message::assistant(text.clone())).await;
+                // Flush buffered text — no tool calls on this path.
+                for chunk in text_chunks {
+                    let _ = tx.send(AgentEvent::Text(chunk)).await;
+                }
                 let _ = tx.send(AgentEvent::Done { finish_reason }).await;
                 break;
             }
@@ -747,6 +792,12 @@ impl Agent {
             }
 
             self.push(Message::assistant(text)).await;
+            // Flush buffered text chunks to the UI — we now know the model
+            // produced a plain text reply (no tool calls), so it is safe to
+            // show the text without risk of rendering raw tool-call JSON.
+            for chunk in text_chunks {
+                let _ = tx.send(AgentEvent::Text(chunk)).await;
+            }
             let _ = tx.send(AgentEvent::Done { finish_reason }).await;
             break;
         }
@@ -1321,49 +1372,6 @@ fn extract_json_objects(text: &str) -> Vec<String> {
         i += 1;
     }
     results
-}
-
-/// Filter out JSON tool call patterns from LLM text output.
-/// Some LLMs (e.g., Llama via Ollama) output tool calls as text instead of structured format.
-/// This prevents system execution details from appearing in user-facing chat.
-fn should_filter_text_chunk(text: &str) -> bool {
-    lazy_static::lazy_static! {
-        // Pattern: Match JSON objects that contain both "name" and "parameters" keys
-        // This catches tool calls even with deeply nested content
-        static ref RE_TOOL_CALL: Regex = Regex::new(
-            r#"\{[^}]*"name"\s*:\s*"[^"]*"[^}]*"parameters"\s*:\s*\{.*?\}\s*\}"#
-        ).unwrap();
-    }
-
-    let trimmed = text.trim();
-
-    // Filter if:
-    // 1. Contains JSON tool call pattern
-    if RE_TOOL_CALL.is_match(trimmed) {
-        return true;
-    }
-
-    // 2. Starts with "}; {" - continuation of truncated tool calls
-    if trimmed.starts_with("};") && trimmed.contains(r#"{"name""#) {
-        return true;
-    }
-
-    // 3. Just artifact tokens (leftover braces from streaming tool-call JSON).
-    //    NOTE: do NOT filter plain whitespace — some models (Llama via Ollama)
-    //    stream spaces as separate chunks; dropping them concatenates words.
-    if trimmed == "};" || trimmed == "}" {
-        return true;
-    }
-
-    // 4. Looks like start of JSON object with "name" key
-    if (trimmed.starts_with('{') || trimmed.starts_with("}; {"))
-        && trimmed.contains(r#""name""#)
-        && trimmed.contains(r#""parameters""#)
-    {
-        return true;
-    }
-
-    false
 }
 
 #[cfg(test)]
