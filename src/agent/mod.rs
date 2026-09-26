@@ -511,6 +511,10 @@ impl Agent {
 
         // Build tool list based on intent — protocol-level enforcement.
         let intent_tools = self.tools_for_intent(&user_intent);
+        // Guard against infinite retry loops when a model persistently
+        // hallucinates tool names it was never given.
+        let mut hallucination_retries = 0u8;
+        const MAX_HALLUCINATION_RETRIES: u8 = 3;
 
         loop {
             let messages = self.snapshot().await;
@@ -599,8 +603,27 @@ impl Agent {
                     names.join(", "),
                     available.join(", ")
                 );
-                let _ = tx.send(AgentEvent::Text(format!("[tool error: {feedback}]\n"))).await;
+                // Push feedback to LLM history only — do NOT send to UI.
+                // This is an internal correction loop; the user should only
+                // see the final result, not the internal error/retry cycle.
+                self.push(Message::assistant_tool_calls_with_text(
+                    structured_invalid.clone(),
+                    text.clone(),
+                ))
+                .await;
                 self.push(Message::user(feedback)).await;
+                // Loop back — give the LLM a chance to use a valid tool name.
+                hallucination_retries += 1;
+                if hallucination_retries >= MAX_HALLUCINATION_RETRIES {
+                    let _ = tx
+                        .send(AgentEvent::Text(
+                            "Agent used an unknown tool repeatedly. Stopping.\n".to_string(),
+                        ))
+                        .await;
+                    let _ = tx.send(AgentEvent::Done { finish_reason }).await;
+                    return Ok(());
+                }
+                continue;
             }
 
             let mut clean_calls: Vec<ToolCall> = structured_valid;
@@ -632,8 +655,27 @@ impl Agent {
                         names.join(", "),
                         available.join(", ")
                     );
-                    let _ = tx.send(AgentEvent::Text(format!("[tool error: {feedback}]\n"))).await;
+                    // Push feedback to LLM history only — do NOT send to UI.
+                    self.push(Message::assistant(text.clone())).await;
                     self.push(Message::user(feedback)).await;
+
+                    if valid.is_empty() {
+                        // All parsed calls were hallucinated — loop back so the
+                        // LLM can retry with a valid tool name.  Do NOT flush
+                        // text_chunks (they were raw JSON, not a prose reply).
+                        hallucination_retries += 1;
+                        if hallucination_retries >= MAX_HALLUCINATION_RETRIES {
+                            let _ = tx
+                                .send(AgentEvent::Text(
+                                    "Agent used an unknown tool repeatedly. Stopping.\n"
+                                        .to_string(),
+                                ))
+                                .await;
+                            let _ = tx.send(AgentEvent::Done { finish_reason }).await;
+                            return Ok(());
+                        }
+                        continue;
+                    }
                 }
 
                 if !valid.is_empty() {
