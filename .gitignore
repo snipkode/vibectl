@@ -1,7 +1,14 @@
 /target
 node_modules/
 *.local
-.vibectl/
+
+# Session state, caches, and the single-shot PLAN.md stay local. Matched as
+# `.vibectl/*` rather than `.vibectl/` because git will not descend into an
+# excluded directory, so the negation below could never re-include anything.
+.vibectl/*
+# Specs are the opposite: requirements, design, and the task list are meant to
+# be reviewed in a pull request, so they are committed.
+!.vibectl/specs/
 
 # Telemetry / caches from local runs — 1.2MB of LMDB and JSONL that must
 # never end up in the repo.

@@ -165,6 +165,70 @@ fn print_report(cwd: &Path, report: &DiscoveryReport) {
         }
     }
 
+    // ── Specs ─────────────────────────────────────────────────────────────────
+    //
+    // Read the specs directory directly rather than adding a DiscoveryEntry
+    // type: a spec is a directory of three files, and reporting which phases
+    // are missing is more useful here than reporting three missing paths.
+    println!();
+    section("Specs");
+    let specs_dir = crate::agent::spec::Spec::specs_dir(cwd);
+    let mut slugs: Vec<String> = std::fs::read_dir(&specs_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    slugs.sort();
+    if slugs.is_empty() {
+        println!(
+            "{}",
+            missing(".vibectl/specs/<slug>/{requirements,design,tasks}.md".to_string())
+        );
+        println!(
+            "{}",
+            info("  Run: /spec add <task>  to decide requirements before coding")
+        );
+    } else {
+        for slug in &slugs {
+            match crate::agent::spec::Spec::load(cwd, slug) {
+                Ok(spec) => {
+                    let progress = if spec.tasks.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {}/{} tasks done", spec.done_count(), spec.tasks.len())
+                    };
+                    let phases: Vec<&str> = [
+                        (spec.requirements.is_some(), "requirements"),
+                        (spec.design.is_some(), "design"),
+                        (!spec.tasks.is_empty(), "tasks"),
+                    ]
+                    .iter()
+                    .filter(|(present, _)| *present)
+                    .map(|(_, name)| *name)
+                    .collect();
+                    println!(
+                        "{}",
+                        ok(format!("{:<35}{}{}", slug, phases.join(" → "), progress))
+                    );
+                    if spec.tasks_unreadable {
+                        println!(
+                            "{}",
+                            warn(format!(
+                                "  ↳ {}/tasks.md has no checkboxes, so nothing is executable",
+                                slug
+                            ))
+                        );
+                    }
+                }
+                Err(e) => println!("{}", warn(format!("{:<35}{e}", slug))),
+            }
+        }
+    }
+
     // ── Tools ─────────────────────────────────────────────────────────────────
     //
     // Read from the live registry rather than a hardcoded list, so a tool that

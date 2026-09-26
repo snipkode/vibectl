@@ -25,6 +25,7 @@ An autonomous terminal coding agent. Chat with an AI that reads, writes, and sea
 - **Plan mode** — generate and save a step-by-step plan to `.vibectl/PLAN.md`
 - **Headless / CI mode** — non-interactive, pipeable, scriptable
 - **Tools**: `read_file`, `write_file`, `patch_file`, `create_dir`, `glob`, `grep`, `list_symbols`, `git`, `shell_exec`, `run_command`, `run_tests`, `web_fetch`
+- **Spec-driven development** — `/spec` writes requirements, design, and an executable task list before code
 - **AST symbol index** — `list_symbols` parses Rust/Python/JS/TS/Go with tree-sitter instead of grepping
 - **Path sandbox** — every file access is confined to the project root; `..` traversal and symlink escapes are refused
 - **Retry with backoff** — 429/5xx are retried with exponential backoff, honouring `Retry-After`; 4xx fails fast
@@ -115,6 +116,57 @@ Traversal (`../../etc/passwd`) and symlink escapes (a directory inside the proje
 `shell_exec`, `run_command` and `run_tests` are **not** filtered by the sandbox — they are gated only by the approval prompt, so `--dangerous-yes` gives the agent unrestricted process execution. Treat it accordingly.
 
 Override model via env: `VIBECTL_MODEL=gpt-4o-mini vibectl`
+
+## Specs — deciding before coding
+
+Vibe coding asks the most guidance exactly where it is hardest: complex tasks,
+and work on top of a large codebase. It also loses the reasoning — a long run
+makes a dozen judgement calls and none of them survive the session.
+
+`/spec` writes the reasoning down *before* any code exists, then makes that
+document the thing the agent executes.
+
+```
+/spec add <task>     →  .vibectl/specs/<slug>/requirements.md
+/spec design         →  .vibectl/specs/<slug>/design.md
+/spec tasks          →  .vibectl/specs/<slug>/tasks.md
+```
+
+The phases are gated: `design` refuses to run before `requirements.md` exists,
+and `tasks` before `design.md`. A spec that skips the reasoning is the problem
+this is meant to prevent, so the ordering is enforced rather than suggested.
+
+**The decision log is the point.** `design.md` must carry a `## Decisions`
+section, one bullet per choice stating what was chosen and what was rejected.
+That is the section a teammate reads months later to understand why the code
+looks the way it does.
+
+**Tasks are executable, not prose.** `tasks.md` is a checkbox list, parsed into
+per-task state. While a spec is active, the agent is told what is done and what
+is next — pending tasks only, capped so a long checklist cannot crowd out the
+conversation — and it works the list in order instead of inventing its own
+sequence. Tick a box by editing the file, or with `/spec done <n>`.
+
+```
+/spec
+  ✓ add-docker-support  requirements  ✓ design  ✓ tasks  (2/5 done, 3 pending)
+
+    ✓ 1. Add the path sandbox guard
+    ✓ 2. Route shell tools through one approval gate
+    · 3. Detect docker-compose.yml
+    · 4. Emit a Compose plan in the status output
+    … 1 more task(s)
+
+  next: [3] Detect docker-compose.yml
+```
+
+Specs are meant to be reviewed, so unlike the rest of `.vibectl/` they are
+**not** gitignored: `.gitignore` ignores `.vibectl/*` and then re-includes
+`.vibectl/specs/`. Session state and caches stay local; the documents a teammate
+needs land in the pull request.
+
+`/plan` is unchanged and still the right tool for a small task — one LLM call,
+one readable plan, no ceremony.
 
 ## Steering — Teaching vibectl about your project
 
@@ -233,11 +285,16 @@ Scans the repository and prints a structured report:
 | Command | Action |
 |---------|--------|
 | `/model <name>` | Switch model |
-| `/plan <task>` | Generate implementation plan |
+| `/plan <task>` | Generate implementation plan (one-shot) |
+| `/spec` | Spec status: phases, per-task state, next task |
+| `/spec add <task>` | Start a spec: writes `requirements.md` |
+| `/spec design` | Write `design.md`, including the decision log |
+| `/spec tasks` | Break the design into an executable checklist |
+| `/spec done <n>` | Tick task `n` |
+| `/spec list` | List every spec with progress |
 | `/undo` | Rollback last agent file changes (git stash pop) |
 | `/steer <rule>` | Append rule to `.vibectl/steer.md` |
 | `/new` | Reset conversation history |
-| `/spec` | Show current plan |
 | `/cfg` | Print effective config |
 | `/provider` | Show provider + model |
 | `/clear` | Clear message view |
@@ -300,6 +357,7 @@ src/
 │   ├── intent.rs     # 7-way intent classification (rules + LLM fallback)
 │   ├── checkpoint.rs # git-stash checkpoints for /undo
 │   ├── steer.rs      # discovery engine, DiscoveryReport, system prompt
+│   ├── spec.rs       # requirements / design / tasks, checklist parsing
 │   ├── autonomous.rs # autonomous run loop
 │   ├── executor.rs   # grouped implementation with confirmation
 │   ├── validation.rs # post-change validation gates

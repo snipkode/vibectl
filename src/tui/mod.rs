@@ -332,9 +332,7 @@ async fn handle_key(
                     // Queue a follow-up ask; delivered when the current run ends.
                     let text = app.submit();
                     let n = app.queue_input(text);
-                    app.push_system(format!(
-                        "Queued ({n} pending) — will send after this task."
-                    ));
+                    app.push_system(format!("Queued ({n} pending) — will send after this task."));
                 }
                 return Ok(());
             }
@@ -595,11 +593,25 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
             });
             app.run_handle = Some(handle);
         }
+        "/spec" | "/specs" if rest.is_empty() => spec_status(app),
         "/spec" => {
-            let plan = crate::agent::steer::read_plan(&app.session.cwd).unwrap_or(None);
-            match plan {
-                Some(p) => app.push_plan(p),
-                None => app.push_system("No plan found. Run /plan <task> first.".to_string()),
+            // `/spec <sub> <args>` — the subcommand is the first word after /spec.
+            let (sub, args) = match rest.split_once(char::is_whitespace) {
+                Some((s, a)) => (s.to_lowercase(), a.trim().to_string()),
+                None => (rest.to_lowercase(), String::new()),
+            };
+            match sub.as_str() {
+                "add" | "new" => spec_add(msg_tx, app, &args),
+                "design" => spec_generate(msg_tx, app, crate::agent::spec::Phase::Design),
+                "tasks" => spec_generate(msg_tx, app, crate::agent::spec::Phase::Tasks),
+                "done" => spec_done(app, &args),
+                "list" => spec_list(app),
+                "status" => spec_status(app),
+                other => app.push_error(format!(
+                    "unknown /spec subcommand `{other}`\n\
+                     try: /spec, /spec add <task>, /spec design, /spec tasks, \
+                     /spec done <n>, /spec list"
+                )),
             }
         }
         "/undo" => {
@@ -636,6 +648,267 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
     }
 }
 
+// ─── /spec ───────────────────────────────────────────────────────────────────
+
+/// `/spec` — status of the most recent spec, or how to start one.
+fn spec_status(app: &mut App) {
+    use crate::agent::spec::Spec;
+    let cwd = app.session.cwd.clone();
+    match Spec::latest(&cwd) {
+        Ok(Some(spec)) => {
+            let mut out = spec.status_lines();
+            if let Some(next) = spec.next_phase() {
+                out.push_str(&format!(
+                    "\n  next: /spec {}{}",
+                    next.label(),
+                    if next == crate::agent::spec::Phase::Requirements {
+                        " <task>"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+
+            // The checklist itself, not just the counts: "which one am I on"
+            // is the question this command exists to answer.
+            if !spec.tasks.is_empty() {
+                const SHOWN: usize = 20;
+                out.push_str("\n\n");
+                for task in spec.tasks.iter().take(SHOWN) {
+                    let indent = "  ".repeat(task.depth + 1);
+                    out.push_str(&format!(
+                        "{indent}{} {}. {}\n",
+                        if task.done { "✓" } else { "·" },
+                        task.number,
+                        task.text
+                    ));
+                }
+                let hidden = spec.tasks.len().saturating_sub(SHOWN);
+                if hidden > 0 {
+                    out.push_str(&format!("  … {hidden} more task(s)\n"));
+                }
+                match spec.tasks.iter().find(|t| !t.done) {
+                    Some(t) => out.push_str(&format!("\n  next: [{}] {}", t.number, t.text)),
+                    None => out.push_str("\n  all tasks complete"),
+                }
+            }
+            app.push_system(out);
+        }
+        Ok(None) => app.push_system(
+            "No spec yet.\n\
+             Start one with:  /spec add <task>\n\
+             Phases run in order: requirements → design → tasks, then the agent \
+             works the checklist."
+                .to_string(),
+        ),
+        Err(e) => app.push_error(e.to_string()),
+    }
+}
+
+/// `/spec list` — every spec, newest first.
+fn spec_list(app: &mut App) {
+    use crate::agent::spec::Spec;
+    let cwd = app.session.cwd.clone();
+    let specs_dir = Spec::specs_dir(&cwd);
+    let mut entries: Vec<_> = match std::fs::read_dir(&specs_dir) {
+        Ok(e) => e
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    if entries.is_empty() {
+        app.push_system(format!("No specs in {}", specs_dir.display()));
+        return;
+    }
+    entries.sort();
+    let mut out = format!("specs in {}:", specs_dir.display());
+    for slug in entries {
+        let line = match Spec::load(&cwd, &slug) {
+            Ok(spec) => {
+                let tasks = if spec.tasks.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}/{} tasks", spec.done_count(), spec.tasks.len())
+                };
+                format!("  {slug}{tasks}")
+            }
+            Err(e) => format!("  {slug}  (unreadable: {e})"),
+        };
+        out.push('\n');
+        out.push_str(&line);
+    }
+    app.push_system(out);
+}
+
+/// `/spec add <task>` — create the spec directory and generate requirements.md.
+fn spec_add(msg_tx: &mpsc::Sender<Msg>, app: &mut App, task: &str) {
+    use crate::agent::spec::Spec;
+    if task.is_empty() {
+        app.push_system("usage: /spec add <task>".to_string());
+        return;
+    }
+    let cwd = app.session.cwd.clone();
+    let (spec, path) = match Spec::create(&cwd, task) {
+        Ok(v) => v,
+        Err(e) => {
+            app.push_error(e.to_string());
+            return;
+        }
+    };
+    app.push_system(format!("created {}", path.display()));
+
+    // Requirements are the only phase generated without a spec to read from,
+    // so it is generated here rather than by spec_generate.
+    let agent = app.session.agent.clone();
+    let tx = msg_tx.clone();
+    let slug = spec.slug.clone();
+    let run_id = app.run_id;
+    let task = task.to_string();
+    app.begin_run();
+    app.run_handle = Some(tokio::spawn(async move {
+        match agent
+            .spec_phase(crate::agent::spec::Phase::Requirements, &task, &spec)
+            .await
+        {
+            Ok(body) => {
+                // Keep the template's headings, replace the TODO placeholders.
+                let doc = format!("# {task}\n\n{}", body.trim());
+                let dir = Spec::dir_for(&cwd, &slug);
+                let path = dir.join(crate::agent::spec::Phase::Requirements.file_name());
+                let written = std::fs::write(&path, &doc)
+                    .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()));
+                match written {
+                    Ok(()) => {
+                        let _ = tx
+                            .send(Msg::App(AppMsg::Plan(format!(
+                                "spec `{slug}` — requirements written to {}\n\n{doc}",
+                                path.display()
+                            ))))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(Msg::App(AppMsg::Error(run_id, e.to_string())))
+                            .await;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Msg::App(AppMsg::Error(run_id, e.to_string())))
+                    .await;
+            }
+        }
+    }));
+}
+
+/// `/spec design` and `/spec tasks` — generate the next phase, gated on the
+/// previous one existing.
+fn spec_generate(msg_tx: &mpsc::Sender<Msg>, app: &mut App, phase: crate::agent::spec::Phase) {
+    use crate::agent::spec::Spec;
+    let cwd = app.session.cwd.clone();
+    let mut spec = match Spec::latest(&cwd) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            app.push_system("No spec yet. Start one with: /spec add <task>".to_string());
+            return;
+        }
+        Err(e) => {
+            app.push_error(e.to_string());
+            return;
+        }
+    };
+    if let Err(e) = spec.ensure_can_write(phase) {
+        app.push_error(e.to_string());
+        return;
+    }
+
+    let agent = app.session.agent.clone();
+    let tx = msg_tx.clone();
+    let run_id = app.run_id;
+    let task = spec
+        .requirements
+        .as_deref()
+        .and_then(|r| {
+            r.lines()
+                .next()
+                .map(|l| l.trim_start_matches("# ").to_string())
+        })
+        .unwrap_or_default();
+    app.begin_run();
+    app.run_handle = Some(tokio::spawn(async move {
+        let label = phase.label();
+        match agent.spec_phase(phase, &task, &spec).await {
+            Ok(body) => {
+                let heading = match phase {
+                    crate::agent::spec::Phase::Design => "# Design",
+                    crate::agent::spec::Phase::Tasks => "# Tasks",
+                    crate::agent::spec::Phase::Requirements => "# Requirements",
+                };
+                let doc = format!("{heading}\n\n{}", body.trim());
+                let result = spec
+                    .write_phase(phase, &doc)
+                    .map_err(|e| anyhow::anyhow!("{e}"));
+                match result {
+                    Ok(path) => {
+                        let _ = tx
+                            .send(Msg::App(AppMsg::Plan(format!(
+                                "spec `{}` — {label} written to {}\n\n{doc}",
+                                spec.slug,
+                                path.display()
+                            ))))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(Msg::App(AppMsg::Error(run_id, e.to_string())))
+                            .await;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(Msg::App(AppMsg::Error(run_id, e.to_string())))
+                    .await;
+            }
+        }
+    }));
+}
+
+/// `/spec done <n>` — tick a task.
+fn spec_done(app: &mut App, args: &str) {
+    use crate::agent::spec::Spec;
+    let number: usize = match args.trim().parse() {
+        Ok(n) => n,
+        Err(_) => {
+            app.push_system("usage: /spec done <task number>".to_string());
+            return;
+        }
+    };
+    let cwd = app.session.cwd.clone();
+    let mut spec = match Spec::latest(&cwd) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            app.push_system("No spec yet.".to_string());
+            return;
+        }
+        Err(e) => {
+            app.push_error(e.to_string());
+            return;
+        }
+    };
+    match spec.complete_task(number) {
+        Ok(()) => app.push_system(format!(
+            "✓ task {number} done  ({}/{})",
+            spec.done_count(),
+            spec.tasks.len()
+        )),
+        Err(e) => app.push_error(e.to_string()),
+    }
+}
+
 fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
     let agent = app.session.agent.clone();
     let (mut stream, handle) = agent.spawn_run(prompt);
@@ -661,7 +934,7 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
                         }
                         AppMsg::Text(run_id, filtered)
                     }
-                },
+                }
                 AgentEvent::ToolCall { id: _, name } => AppMsg::ToolStart(run_id, name),
                 AgentEvent::ToolResult { name, content, .. } => AppMsg::ToolResult {
                     run_id,
@@ -689,18 +962,18 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
 /// Some LLMs (e.g., Llama via Ollama) output tool calls as text instead of structured format.
 fn filter_tool_call_json(text: &str) -> String {
     use regex::Regex;
-    
+
     // Pattern: {"name":"...","parameters":{...}}
     // This regex matches JSON objects with "name" and "parameters" keys
     let re = Regex::new(r#"\{"name":"[^"]+","parameters":\{[^}]*\}\}"#).unwrap();
-    
+
     // Also match variations with whitespace and escaped quotes
     let re_complex = Regex::new(r#"\{[^}]*"name"[^}]*"parameters"[^}]*\}"#).unwrap();
-    
+
     let mut result = text.to_string();
     result = re.replace_all(&result, "").to_string();
     result = re_complex.replace_all(&result, "").to_string();
-    
+
     // Clean up multiple semicolons and extra whitespace left behind.
     // NOTE: do NOT trim() here — a trim() strips leading/trailing whitespace
     // from each streamed chunk, and Llama-style tokenizers put the preceding
@@ -724,4 +997,223 @@ fn extract_at_query(input: &str, cursor: usize) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod spec_tests {
+    use super::*;
+    use crate::agent::spec::Spec;
+
+    fn app_in(dir: &std::path::Path) -> App {
+        // Anchor the project root so find_project_root does not walk upwards.
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let session =
+            crate::session::Session::new(crate::config::Config::default(), dir.to_path_buf(), None)
+                .expect("session");
+        App::new(session)
+    }
+
+    fn last_text(app: &App) -> String {
+        app.messages
+            .last()
+            .map(|m| m.text.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn spec_with_no_spec_explains_how_to_start_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        spec_status(&mut a);
+        let out = last_text(&a);
+        assert!(out.contains("/spec add"), "should be actionable: {out}");
+    }
+
+    #[tokio::test]
+    async fn spec_add_creates_the_directory_and_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        // The LLM call is spawned, but the directory and file are created
+        // synchronously, so the on-disk result is deterministic.
+        spec_add(&tx, &mut a, "Add Docker support");
+        let specs = Spec::specs_dir(dir.path()).join("add-docker-support");
+        assert!(specs.join("requirements.md").is_file(), "{:?}", specs);
+        assert!(last_text(&a).contains("requirements.md"));
+    }
+
+    #[test]
+    fn spec_add_without_a_task_shows_usage_instead_of_creating_a_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        spec_add(&tx, &mut a, "");
+        assert!(last_text(&a).contains("usage:"));
+        assert!(!Spec::specs_dir(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn spec_tasks_before_design_is_refused_and_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        spec_add(&tx, &mut a, "Ordered work");
+        a.messages.clear();
+        spec_generate(&tx, &mut a, crate::agent::spec::Phase::Tasks);
+
+        let out = last_text(&a);
+        assert!(out.contains("design"), "must name the missing phase: {out}");
+    }
+
+    #[tokio::test]
+    async fn spec_status_lists_each_task_and_its_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        spec_add(&tx, &mut a, "Checklist work");
+        let spec_dir = Spec::specs_dir(dir.path()).join("checklist-work");
+        std::fs::write(spec_dir.join("design.md"), "# Design\n").unwrap();
+        std::fs::write(
+            spec_dir.join("tasks.md"),
+            "- [x] finished thing\n- [ ] pending thing\n",
+        )
+        .unwrap();
+
+        a.messages.clear();
+        spec_status(&mut a);
+        let out = last_text(&a);
+        assert!(out.contains("1/2 done"), "got: {out}");
+        assert!(out.contains("✓ 1. finished thing"), "got: {out}");
+        assert!(out.contains("· 2. pending thing"), "got: {out}");
+        assert!(out.contains("next: [2] pending thing"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn spec_status_warns_when_tasks_md_has_no_checkboxes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        spec_add(&tx, &mut a, "Prose only");
+        let spec_dir = Spec::specs_dir(dir.path()).join("prose-only");
+        std::fs::write(spec_dir.join("design.md"), "# Design\n").unwrap();
+        std::fs::write(spec_dir.join("tasks.md"), "TODO: write tasks\n").unwrap();
+
+        a.messages.clear();
+        spec_status(&mut a);
+        assert!(last_text(&a).contains("no checkboxes"));
+    }
+
+    #[tokio::test]
+    async fn spec_done_ticks_and_reports_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        spec_add(&tx, &mut a, "Tick work");
+        let spec_dir = Spec::specs_dir(dir.path()).join("tick-work");
+        std::fs::write(spec_dir.join("design.md"), "# Design\n").unwrap();
+        std::fs::write(spec_dir.join("tasks.md"), "- [ ] one\n- [ ] two\n").unwrap();
+
+        a.messages.clear();
+        spec_done(&mut a, "2");
+        assert!(
+            last_text(&a).contains("task 2 done"),
+            "got: {}",
+            last_text(&a)
+        );
+        assert!(
+            std::fs::read_to_string(spec_dir.join("tasks.md"))
+                .unwrap()
+                .contains("- [x] two")
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_done_rejects_nonsense_and_out_of_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        spec_add(&tx, &mut a, "Range work");
+        let spec_dir = Spec::specs_dir(dir.path()).join("range-work");
+        std::fs::write(spec_dir.join("design.md"), "# Design\n").unwrap();
+        std::fs::write(spec_dir.join("tasks.md"), "- [ ] only\n").unwrap();
+
+        a.messages.clear();
+        spec_done(&mut a, "banana");
+        assert!(last_text(&a).contains("usage:"));
+
+        a.messages.clear();
+        spec_done(&mut a, "7");
+        assert!(
+            last_text(&a).contains("no task 7"),
+            "got: {}",
+            last_text(&a)
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_list_shows_every_spec_with_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        spec_add(&tx, &mut a, "First thing");
+        spec_add(&tx, &mut a, "Second thing");
+        let spec_dir = Spec::specs_dir(dir.path()).join("first-thing");
+        std::fs::write(spec_dir.join("design.md"), "# Design\n").unwrap();
+        std::fs::write(spec_dir.join("tasks.md"), "- [x] a\n- [ ] b\n").unwrap();
+
+        a.messages.clear();
+        spec_list(&mut a);
+        let out = last_text(&a);
+        assert!(out.contains("first-thing"), "got: {out}");
+        assert!(out.contains("1/2 tasks"), "got: {out}");
+        assert!(out.contains("second-thing"), "got: {out}");
+    }
+
+    #[test]
+    fn spec_list_on_an_empty_project_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        spec_list(&mut a);
+        assert!(last_text(&a).contains("No specs"));
+    }
+
+    #[tokio::test]
+    async fn spec_dispatch_rejects_an_unknown_subcommand() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        handle_command(&tx, &mut a, "/spec bogus").await;
+        let out = last_text(&a);
+        assert!(out.contains("bogus"), "got: {out}");
+        assert!(out.contains("/spec add"), "should list valid forms: {out}");
+    }
+
+    #[tokio::test]
+    async fn spec_dispatch_routes_bare_spec_to_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app_in(dir.path());
+        let (tx, _rx) = mpsc::channel(64);
+
+        handle_command(&tx, &mut a, "/spec").await;
+        assert!(last_text(&a).contains("No spec yet"));
+    }
+
+    #[test]
+    fn the_help_table_starts_the_command_line_with_its_own_name() {
+        for (name, _, usage) in crate::tui::app::COMMANDS {
+            assert!(
+                usage.starts_with(name),
+                "{name} usage {usage:?} should start with the command"
+            );
+        }
+    }
 }

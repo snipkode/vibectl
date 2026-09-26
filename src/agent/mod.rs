@@ -3,6 +3,7 @@ pub mod checkpoint;
 pub mod executor;
 pub mod intent;
 pub mod report;
+pub mod spec;
 pub mod steer;
 pub mod validation;
 
@@ -269,6 +270,35 @@ impl Agent {
         resp.content.context("plan produced no output")
     }
 
+    /// Generate one phase document of a spec.
+    ///
+    /// `spec` supplies the already-agreed earlier phases as context, which is
+    /// what keeps the design from contradicting the requirements and the tasks
+    /// from drifting off the design.
+    pub async fn spec_phase(
+        &self,
+        phase: spec::Phase,
+        task: &str,
+        spec: &spec::Spec,
+    ) -> Result<String> {
+        let req = ChatRequest {
+            model: self.model.clone(),
+            messages: vec![
+                Message::system(spec::phase_system_prompt(phase, task)),
+                Message::user(spec::phase_input(phase, task, spec)),
+            ],
+            // Low temperature: these are documents that get committed, so a
+            // creative rewrite is a liability rather than a feature.
+            temperature: 0.2,
+            max_tokens: Some(2048),
+            stream: false,
+            tools: vec![],
+            system: None,
+        };
+        let resp = self.provider.chat(&req).await?;
+        resp.content.context("spec phase produced no output")
+    }
+
     fn merge_tool_deltas(slots: &mut Vec<ToolCall>, deltas: &[ToolCallDelta]) {
         for d in deltas {
             if slots.len() <= d.index as usize {
@@ -305,9 +335,19 @@ impl Agent {
         )
     }
 
+    /// Tools that spawn a process. Everything here requires approval.
+    fn is_shell_tool(name: &str) -> bool {
+        matches!(name, "shell_exec" | "run_command" | "run_tests")
+    }
+
     /// Tools that implement code changes (write files to disk).
     fn is_write_tool(name: &str) -> bool {
-        matches!(name, "write_file" | "patch_file")
+        matches!(name, "write_file" | "patch_file" | "create_dir")
+    }
+
+    /// Does this tool need an explicit human "yes" before it runs?
+    fn requires_approval(name: &str) -> bool {
+        Self::is_shell_tool(name) || Self::is_write_tool(name)
     }
 
     /// Gate for code-implementation work. When the model wants to write or
@@ -437,6 +477,15 @@ impl Agent {
                         )))
                         .await;
                 }
+            }
+        }
+
+        // Spec context, injected fresh every turn because the agent ticks its
+        // own boxes mid-run. Pending tasks only — see Spec::context_block.
+        if let Ok(Some(spec)) = spec::Spec::latest(&self.cwd) {
+            let block = spec.context_block();
+            if !block.is_empty() {
+                self.push(Message::system(block)).await;
             }
         }
 
@@ -826,7 +875,7 @@ impl Agent {
         // Filesystem reads are sandboxed exactly like writes.  A read is not a
         // "safe" operation — pulling ~/.ssh/id_rsa into the prompt leaks it
         // without ever triggering an approval prompt.
-        if matches!(name.as_str(), "read_file" | "list_symbols") {
+        if matches!(name.as_str(), "read_file" | "list_symbols" | "create_dir") {
             let path_str = args
                 .get("path")
                 .and_then(serde_json::Value::as_str)
@@ -844,14 +893,24 @@ impl Agent {
             return Ok(refusal);
         }
 
-        if name == "shell_exec" {
+        // Every tool that spawns a process goes through the same approval gate.
+        // Matching on a single hardcoded name meant `run_command` and
+        // `run_tests` fell through to a bare `tool.run()` and executed
+        // unapproved.
+        if Self::is_shell_tool(&name) {
             let cmd = args
                 .get("command")
+                .or_else(|| args.get("test_command"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let label = if name == "run_tests" {
+                "run tests"
+            } else {
+                "run"
+            };
             if let Some(approver) = &self.approver
-                && let Approval::Deny = approver.approve(format!("$ {cmd}")).await
+                && let Approval::Deny = approver.approve(format!("{label}: {cmd}")).await
             {
                 return Ok(crate::tools::ToolResult {
                     content: format!("Command rejected by user approval: {cmd}"),
@@ -995,6 +1054,19 @@ impl Agent {
             return tool.run(&args, &self.cwd);
         }
 
+        // Backstop: a tool classified as write- or shell-executing must never
+        // reach here unapproved. The explicit branches above are what produce
+        // the approval prompt; this makes that table authoritative rather than
+        // advisory, so adding a tool to one list cannot silently skip the gate.
+        if Self::requires_approval(&name) {
+            return Ok(crate::tools::ToolResult {
+                content: format!(
+                    "SAFEGUARD: {name} requires approval but has no approval handler. \
+                     This is a vibectl bug — refusing to run it."
+                ),
+            });
+        }
+
         tool.run(&args, &self.cwd)
     }
 }
@@ -1010,40 +1082,102 @@ fn should_filter_text_chunk(text: &str) -> bool {
             r#"\{[^}]*"name"\s*:\s*"[^"]*"[^}]*"parameters"\s*:\s*\{.*?\}\s*\}"#
         ).unwrap();
     }
-    
+
     let trimmed = text.trim();
-    
+
     // Filter if:
     // 1. Contains JSON tool call pattern
     if RE_TOOL_CALL.is_match(trimmed) {
         return true;
     }
-    
+
     // 2. Starts with "}; {" - continuation of truncated tool calls
     if trimmed.starts_with("};") && trimmed.contains(r#"{"name""#) {
         return true;
     }
-    
+
     // 3. Just artifact tokens (leftover braces from streaming tool-call JSON).
     //    NOTE: do NOT filter plain whitespace — some models (Llama via Ollama)
     //    stream spaces as separate chunks; dropping them concatenates words.
     if trimmed == "};" || trimmed == "}" {
         return true;
     }
-    
+
     // 4. Looks like start of JSON object with "name" key
-    if (trimmed.starts_with('{') || trimmed.starts_with("}; {")) 
-        && trimmed.contains(r#""name""#) 
-        && trimmed.contains(r#""parameters""#) {
+    if (trimmed.starts_with('{') || trimmed.starts_with("}; {"))
+        && trimmed.contains(r#""name""#)
+        && trimmed.contains(r#""parameters""#)
+    {
         return true;
     }
-    
+
     false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_mutating_tool_is_classified_for_approval() {
+        // A new tool that writes or spawns a process but is missing from
+        // is_write_tool / is_shell_tool would execute with no prompt at all.
+        for tool in crate::tools::all_tools() {
+            let name = tool.def().name;
+            if name == "create_dir" {
+                assert!(Agent::is_write_tool(&name), "{name} mutates the filesystem");
+            }
+            if name == "run_command" || name == "run_tests" || name == "shell_exec" {
+                assert!(Agent::is_shell_tool(&name), "{name} spawns a process");
+            }
+            if Agent::is_readonly_tool(&name) {
+                assert!(
+                    !Agent::requires_approval(&name),
+                    "{name} cannot be both read-only and approval-gated"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn read_only_tools_stay_read_only() {
+        for name in [
+            "read_file",
+            "glob",
+            "grep",
+            "git",
+            "web_fetch",
+            "list_symbols",
+        ] {
+            assert!(Agent::is_readonly_tool(name));
+            assert!(!Agent::requires_approval(name), "{name} must not prompt");
+        }
+    }
+
+    #[test]
+    fn mutating_tools_require_approval() {
+        for name in [
+            "write_file",
+            "patch_file",
+            "create_dir",
+            "shell_exec",
+            "run_command",
+            "run_tests",
+        ] {
+            assert!(Agent::requires_approval(name), "{name} must prompt");
+            assert!(!Agent::is_readonly_tool(name), "{name} is not read-only");
+        }
+    }
+
+    #[test]
+    fn approval_and_sandbox_classifications_are_disjoint() {
+        // Anything that writes must also be sandbox-checked, so the two lists
+        // cannot drift apart unnoticed.
+        for name in ["write_file", "patch_file", "create_dir"] {
+            assert!(Agent::is_write_tool(name));
+            assert!(!Agent::is_shell_tool(name), "{name} is not a shell tool");
+        }
+    }
 
     #[test]
     fn merge_creates_slot_with_args() {
