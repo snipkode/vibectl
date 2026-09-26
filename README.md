@@ -24,7 +24,10 @@ An autonomous terminal coding agent. Chat with an AI that reads, writes, and sea
 - **`vibectl audit`** — scan repo, detect languages, inventory features, flag security gaps, list unknowns
 - **Plan mode** — generate and save a step-by-step plan to `.vibectl/PLAN.md`
 - **Headless / CI mode** — non-interactive, pipeable, scriptable
-- **Tools**: `read_file`, `write_file`, `glob`, `grep`, `git`, `shell_exec`, `web_fetch`
+- **Tools**: `read_file`, `write_file`, `patch_file`, `glob`, `grep`, `list_symbols`, `git`, `shell_exec`, `web_fetch`
+- **AST symbol index** — `list_symbols` parses Rust/Python/JS/TS/Go with tree-sitter instead of grepping
+- **Path sandbox** — every file access is confined to the project root; `..` traversal and symlink escapes are refused
+- **Retry with backoff** — 429/5xx are retried with exponential backoff, honouring `Retry-After`; 4xx fails fast
 - **Shell approval** — all shell commands and file writes pause for `[y]/[n]` confirmation
 - **Interrupt safety** — Ctrl+C or Esc cancels a running agent; stale in-flight events are discarded
 
@@ -67,6 +70,9 @@ vibectl --headless --dangerous-yes "run tests and fix all failures"  # CI
 
 # Pipe a prompt
 echo "what does session.rs do?" | vibectl --headless
+
+# Roll back the last agent run (pops its git-stash checkpoint)
+vibectl undo
 ```
 
 ## Configuration
@@ -75,16 +81,38 @@ Global config: `~/.config/vibectl/config.yaml`
 Project config: `.vibectl/config.yaml` (merged over global)
 
 ```yaml
-model: gpt-4o           # or claude-*, llama3.2, etc.
+# Defaults shown. Everything is optional.
+model: llama3.2          # prefix decides the provider: claude-* / gpt-*
 temperature: 0.2
 max_tokens: 4096
-openai_base_url: https://api.openai.com/v1
+system_prompt: ""        # replaces the built-in agent prompt when set
+allow_any_path: false    # lift the project-root sandbox (see below)
+
+# Provider credentials. Env vars are used as a fallback:
+#   OPENAI_API_KEY, ANTHROPIC_API_KEY, OLLAMA_URL
+openai_api_key: ""
+anthropic_api_key: ""
 ollama_base_url: http://localhost:11434
-custom_base_url: https://your-endpoint/v1
-custom_api_key: ""
+
+# Any OpenAI-compatible endpoint
+custom_providers:
+  - name: internal
+    base_url: https://llm.internal/v1
+    api_key: ""
+    models: [house-model, house-model-small]
 ```
 
-Provider resolution order: model prefix (`claude-*` → Anthropic, `gpt-*` → OpenAI) → configured provider → Ollama fallback.
+Provider resolution order: model prefix (`claude-*` → Anthropic, `gpt-*` → OpenAI) → matching `custom_providers` entry → Ollama fallback. Resolution is case-insensitive, so `GPT-4o` and `gpt-4o` route identically.
+
+A project config (`.vibectl/config.yaml`) is merged **over** the global one. Only the keys it actually mentions are overridden — a project file that sets just `temperature` leaves your global model alone. Note the one-way latch: a project config can widen `allow_any_path` but never re-lock it.
+
+### The path sandbox
+
+All filesystem tools are confined to the detected project root. `read_file` included — a read-only tool is not a safe tool, and pulling `~/.ssh/id_rsa` into the prompt leaks it without ever raising an approval prompt.
+
+Traversal (`../../etc/passwd`) and symlink escapes (a directory inside the project linking to `/etc`) are both refused. Lift it with `allow_any_path: true`, or per-run with `--dangerous-yes` in headless mode.
+
+`shell_exec` is **not** filtered by the sandbox — it is gated only by the approval prompt, so `--dangerous-yes` gives the agent unrestricted shell access. Treat it accordingly.
 
 Override model via env: `VIBECTL_MODEL=gpt-4o-mini vibectl`
 
@@ -170,10 +198,12 @@ Scans the repository and prints a structured report:
 
   Feature Analysis
   ────────────────────────────────────────────────
-  ✓  DONE     Interactive TUI
-  ✓  DONE     Multi-provider LLM
-  ✗  MISSING  JSON output
-  ⚠  PARTIAL  Progress indicators
+  ✓  DONE     Automated tests         test suite detected
+  ✗  MISSING  CI pipeline             no pipeline definition found
+  ✗  MISSING  Lint / format config    clippy/rustfmt/eslint/prettier/biome
+  ✓  DONE     Dependency locking      Cargo.lock / package-lock.json / go.sum
+  ✗  MISSING  Environment template    .env.example documents required config
+  ✗  MISSING  License                 LICENSE file at repo root
 
   Unknown / Needs Verification
   ────────────────────────────────────────────────
@@ -211,48 +241,72 @@ Scans the repository and prints a structured report:
 | `/cfg` | Print effective config |
 | `/provider` | Show provider + model |
 | `/clear` | Clear message view |
-| `/help` | Toggle help |
+| `/help` `/?` | Toggle help |
+| `/quit` `/exit` | Exit vibectl |
+
+There is no session persistence: `/new` clears the in-memory conversation, and closing the terminal discards it. History recall (`↑`/`↓`) covers prompts typed in this session only.
 
 ## Tools
 
-| Tool | Description |
-|------|-------------|
-| `read_file` | Read file with offset/limit |
-| `write_file` | Create or overwrite a file (requires approval) |
-| `glob` | Find files by pattern |
-| `grep` | Search file contents by regex |
-| `git` | status / diff / log in the project |
-| `shell_exec` | Run any shell command (requires approval) |
-| `web_fetch` | Fetch and extract content from a URL |
+| Tool | Description | Approval |
+|------|-------------|----------|
+| `read_file` | Read file with offset/limit | no |
+| `glob` | Find files by pattern | no |
+| `grep` | Search file contents by regex | no |
+| `list_symbols` | AST symbol index (Rust, Python, JS, TS, Go) | no |
+| `git` | status / diff / log in the project | no |
+| `web_fetch` | Fetch and extract content from a URL | no |
+| `write_file` | Create or overwrite a file | yes |
+| `patch_file` | Apply a unified diff hunk | yes |
+| `shell_exec` | Run any shell command | yes |
+
+The six read-only tools run without a prompt but are still confined to the project root. `patch_file` shows a diff preview before writing.
 
 ## Project structure
 
 ```
 src/
 ├── main.rs           # entrypoint, CLI routing
-├── cli.rs            # clap argument parsing (audit subcommand, flags)
-├── config.rs         # config loading + merge (global + project)
+├── cli.rs            # clap argument parsing (audit + undo subcommands, flags)
+├── config.rs         # config loading, ConfigOverlay merge (global + project)
 ├── session.rs        # session state, model switching
 ├── headless.rs       # non-interactive / CI mode
 ├── audit.rs          # repository audit engine
 ├── llm/
-│   ├── provider.rs   # Provider trait, message types
+│   ├── provider.rs   # Provider trait, message types, retry policy
 │   ├── resolve.rs    # provider resolution logic
-│   ├── openai.rs     # OpenAI-compatible + Ollama + custom
-│   └── anthropic.rs  # Anthropic Messages API + SSE streaming
+│   ├── openai.rs     # OpenAI-compatible + SSE streaming
+│   ├── anthropic.rs  # Anthropic Messages API + SSE streaming
+│   └── ollama.rs     # Ollama provider
 ├── tools/
+│   ├── mod.rs        # Tool trait, registry, path sandbox (normalize/is_within)
 │   ├── read_file.rs
 │   ├── write_file.rs
+│   ├── patch_file.rs  # unified-diff application
+│   ├── symbols.rs     # tree-sitter AST symbol extraction
 │   ├── search.rs     # glob + grep
 │   ├── git.rs
 │   ├── shell.rs
 │   └── web.rs        # web_fetch
 ├── agent/
 │   ├── mod.rs        # agent loop, tool dispatch, approval, run_id
+│   ├── intent.rs     # 7-way intent classification (rules + LLM fallback)
+│   ├── checkpoint.rs # git-stash checkpoints for /undo
 │   └── steer.rs      # discovery engine, DiscoveryReport, system prompt
 └── tui/
     ├── mod.rs        # event loop, key handling, slash commands
-    ├── app.rs        # app state, run_id, ctrl_c_count
+    ├── app.rs        # app state, run_id, ctrl_c_count, @-mentions
     ├── ui.rs         # rendering — header, chat body, input box, modals
     └── backend.rs    # resilient crossterm backend
 ```
+
+## Development
+
+```sh
+cargo build --release
+cargo test              # 172 tests
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+```
+
+CI (`.github/workflows/ci.yml`) gates every push on fmt, clippy with `-D warnings`, the test suite, a 1.85 MSRV build check, and `cargo audit`.
