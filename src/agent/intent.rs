@@ -396,10 +396,10 @@ pub fn intent_rules(input: &str) -> Option<Intent> {
     }
 
     // 6. Preference / language request → Conversational (if no task verb)
-    if starts_with_any(&lower, PREF_SIGNALS) || contains_any(&lower, PREF_SIGNALS) {
-        if !contains_any(&lower, TASK_VERBS) {
-            return Some(Intent::Conversational);
-        }
+    if (starts_with_any(&lower, PREF_SIGNALS) || contains_any(&lower, PREF_SIGNALS))
+        && !contains_any(&lower, TASK_VERBS)
+    {
+        return Some(Intent::Conversational);
     }
 
     // 7. Refactor — broad restructuring
@@ -472,12 +472,11 @@ pub async fn classify_intent_llm(input: &str, model: &str, provider: Arc<dyn Pro
         Ok(resp) => {
             let text = resp.content.unwrap_or_default();
             // Try strict JSON parse
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) {
-                if let Some(label) = val.get("intent").and_then(|v| v.as_str()) {
-                    if let Some(intent) = Intent::from_label(label) {
-                        return intent;
-                    }
-                }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim())
+                && let Some(label) = val.get("intent").and_then(|v| v.as_str())
+                && let Some(intent) = Intent::from_label(label)
+            {
+                return intent;
             }
             // Scan raw text for any label keyword
             let lower = text.to_lowercase();
@@ -490,10 +489,10 @@ pub async fn classify_intent_llm(input: &str, model: &str, provider: Arc<dyn Pro
                 "git",
                 "deploy",
             ] {
-                if lower.contains(label) {
-                    if let Some(intent) = Intent::from_label(label) {
-                        return intent;
-                    }
+                if lower.contains(label)
+                    && let Some(intent) = Intent::from_label(label)
+                {
+                    return intent;
                 }
             }
             Intent::CodeWrite // safe default

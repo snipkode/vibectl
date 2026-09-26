@@ -356,12 +356,13 @@ pub fn discover(cwd: &Path) -> DiscoveryReport {
 
     // Also check cwd/.vibectl/steer.md (may differ from root)
     let cwd_steer = cwd.join(".vibectl").join("steer.md");
-    if cwd_steer.is_file() && root.as_deref() != Some(cwd) {
-        if let Ok(raw) = std::fs::read_to_string(&cwd_steer) {
-            content.push_str(&raw);
-            content.push('\n');
-            report.sources.push(cwd_steer.display().to_string());
-        }
+    if cwd_steer.is_file()
+        && root.as_deref() != Some(cwd)
+        && let Ok(raw) = std::fs::read_to_string(&cwd_steer)
+    {
+        content.push_str(&raw);
+        content.push('\n');
+        report.sources.push(cwd_steer.display().to_string());
     }
 
     // ── Steering directories ──────────────────────────────────────────────────
@@ -413,16 +414,16 @@ pub fn discover(cwd: &Path) -> DiscoveryReport {
     if let Some(root) = &root {
         for name in docs_candidates {
             let p = root.join(name);
-            if p.is_file() {
-                if let Ok(raw) = std::fs::read_to_string(&p) {
-                    let note = first_heading(&raw).unwrap_or_else(|| "docs".into());
-                    report
-                        .steering
-                        .push(DiscoveryEntry::found(p.display().to_string(), &note));
-                    content.push_str(&raw);
-                    content.push('\n');
-                    report.sources.push(p.display().to_string());
-                }
+            if p.is_file()
+                && let Ok(raw) = std::fs::read_to_string(&p)
+            {
+                let note = first_heading(&raw).unwrap_or_else(|| "docs".into());
+                report
+                    .steering
+                    .push(DiscoveryEntry::found(p.display().to_string(), &note));
+                content.push_str(&raw);
+                content.push('\n');
+                report.sources.push(p.display().to_string());
             }
         }
     }
@@ -541,10 +542,10 @@ fn collect_tree(
             collect_tree(root, &path, skip_dirs, source_exts, out, max);
         } else if path.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if source_exts.contains(&ext) {
-                if let Ok(rel) = path.strip_prefix(root) {
-                    out.push(format!("  {}", rel.display()));
-                }
+            if source_exts.contains(&ext)
+                && let Ok(rel) = path.strip_prefix(root)
+            {
+                out.push(format!("  {}", rel.display()));
             }
         }
     }

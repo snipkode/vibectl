@@ -190,7 +190,7 @@ fn apply_patch(original: &str, patch: &str) -> Result<String> {
                     i += 1;
                 } else {
                     // Context line (space prefix or bare line).
-                    let ctx = if hl.starts_with(' ') { &hl[1..] } else { hl };
+                    let ctx = hl.strip_prefix(' ').unwrap_or(hl);
                     let orig = orig_lines
                         .get(cursor + orig_consumed)
                         .copied()
@@ -217,9 +217,7 @@ fn apply_patch(original: &str, patch: &str) -> Result<String> {
     }
 
     // Copy any remaining lines after the last hunk.
-    for j in cursor..orig_lines.len() {
-        output.push(orig_lines[j]);
-    }
+    output.extend(orig_lines.iter().skip(cursor).copied());
 
     // Preserve trailing newline if the original had one.
     let mut result = output.join("\n");
