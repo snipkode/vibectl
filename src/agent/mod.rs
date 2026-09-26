@@ -473,10 +473,9 @@ impl Agent {
                 Ok(plan) => {
                     let _ = crate::agent::steer::save_plan(&self.cwd, &plan);
                     let _ = tx.send(AgentEvent::Plan(plan.clone())).await;
-                    self.push(Message::system(format!(
-                        "Auto-generated implementation plan for this task:\n\n{plan}\n\n\
-                         Execute the steps above. Use tools to inspect, then implement."
-                    )))
+                    self.push(Message::system(
+                        crate::agent::steer::build_mode_with_plan_prefix(&plan),
+                    ))
                     .await;
                 }
                 Err(e) => {
@@ -486,6 +485,16 @@ impl Agent {
                         )))
                         .await;
                 }
+            }
+        } else if is_first_turn {
+            // No auto-plan this turn — but if a saved plan exists from a previous
+            // `/plan` command, inject it as BUILD MODE context so the agent
+            // executes it rather than re-planning from scratch.
+            if let Ok(Some(saved_plan)) = crate::agent::steer::read_plan(&self.cwd) {
+                self.push(Message::system(
+                    crate::agent::steer::build_mode_with_plan_prefix(&saved_plan),
+                ))
+                .await;
             }
         }
 
