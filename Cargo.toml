@@ -2,8 +2,12 @@
 name = "vibectl"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Vibe coding agent CLI in the terminal - an agentic coding assistant"
 license = "MIT"
+readme = "README.md"
+# Not published to crates.io: this is a locally installed tool.
+publish = false
 
 [[bin]]
 name = "vibectl"
