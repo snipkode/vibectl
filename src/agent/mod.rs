@@ -106,7 +106,7 @@ impl Agent {
 
     /// Estimate token count for a string (rough: 1 token ≈ 4 chars).
     fn estimate_tokens(s: &str) -> usize {
-        (s.len() + 3) / 4
+        s.len().div_ceil(4)
     }
 
     /// Estimate token count for a single message (role + content).
@@ -613,6 +613,28 @@ impl Agent {
             .collect()
     }
 
+    /// The sandbox root: the detected project root, falling back to the cwd.
+    fn sandbox_root(&self) -> PathBuf {
+        crate::agent::steer::find_project_root(&self.cwd).unwrap_or_else(|| self.cwd.clone())
+    }
+
+    /// Resolve a path argument from a tool call and enforce the sandbox.
+    ///
+    /// Applies to *every* tool that touches the filesystem by path — reads
+    /// included.  A read-only tool is not a safe tool: `read_file` on
+    /// `~/.ssh/id_rsa` needs no approval but exfiltrates a secret into the
+    /// prompt just as effectively as a write does.
+    fn resolve_in_sandbox(
+        &self,
+        path_str: &str,
+    ) -> std::result::Result<PathBuf, crate::tools::ToolResult> {
+        if self.allow_any_path {
+            return Ok(crate::tools::read_file::resolve_path(&self.cwd, path_str));
+        }
+        crate::tools::resolve_within(&self.sandbox_root(), &self.cwd, path_str)
+            .map_err(|reason| crate::tools::ToolResult { content: reason })
+    }
+
     /// Build a unified diff preview string between `old` and `new` content.
     /// Returns at most `max_lines` of diff output to keep approval prompts readable.
     fn build_diff_preview(old: &str, new_content: &str, max_lines: usize) -> String {
@@ -693,6 +715,27 @@ impl Agent {
         let args: serde_json::Value = serde_json::from_str(&call.arguments)
             .with_context(|| format!("invalid args for tool {name}: {}", call.arguments))?;
 
+        // Filesystem reads are sandboxed exactly like writes.  A read is not a
+        // "safe" operation — pulling ~/.ssh/id_rsa into the prompt leaks it
+        // without ever triggering an approval prompt.
+        if matches!(name.as_str(), "read_file" | "list_symbols") {
+            let path_str = args
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if let Err(refusal) = self.resolve_in_sandbox(path_str) {
+                return Ok(refusal);
+            }
+        }
+
+        // `grep` can walk an arbitrary directory via its optional `path` arg.
+        if name == "grep"
+            && let Some(subdir) = args.get("path").and_then(serde_json::Value::as_str)
+            && let Err(refusal) = self.resolve_in_sandbox(subdir)
+        {
+            return Ok(refusal);
+        }
+
         if name == "shell_exec" {
             let cmd = args
                 .get("command")
@@ -716,9 +759,8 @@ impl Agent {
                 .unwrap_or("")
                 .to_string();
             let target = crate::tools::read_file::resolve_path(&self.cwd, &path_str);
-            let root = crate::agent::steer::find_project_root(&self.cwd)
-                .unwrap_or_else(|| self.cwd.clone());
-            let outside = !target.starts_with(&root);
+            let root = self.sandbox_root();
+            let outside = !crate::tools::is_within(&root, &target);
 
             if outside && !self.allow_any_path {
                 return Ok(crate::tools::ToolResult {
@@ -769,9 +811,8 @@ impl Agent {
                 .unwrap_or("")
                 .to_string();
             let target = crate::tools::read_file::resolve_path(&self.cwd, &path_str);
-            let root = crate::agent::steer::find_project_root(&self.cwd)
-                .unwrap_or_else(|| self.cwd.clone());
-            let outside = !target.starts_with(&root);
+            let root = self.sandbox_root();
+            let outside = !crate::tools::is_within(&root, &target);
 
             if outside && !self.allow_any_path {
                 return Ok(crate::tools::ToolResult {
@@ -1091,7 +1132,7 @@ mod tests {
         };
         let asst_msg = Message::assistant_tool_calls_with_text(vec![tool_call], "");
         let res_msg = Message::tool_result("c1", "Build succeeded");
-        let history = vec![user_msg, asst_msg, res_msg];
+        let history = [user_msg, asst_msg, res_msg];
         assert_eq!(history[0].role, Role::User);
         assert_eq!(history[1].role, Role::Assistant);
         assert!(!history[1].tool_calls.is_empty());
