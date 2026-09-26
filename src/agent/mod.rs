@@ -530,6 +530,13 @@ impl Agent {
         let mut hallucination_retries = 0u8;
         const MAX_HALLUCINATION_RETRIES: u8 = 3;
 
+        // ── Run-level activity tracker ─────────────────────────────────────────
+        // Accumulates what the agent actually did so we can generate a summary
+        // when the model produces an empty final response (common with small
+        // local models like qwen2.5-coder:1.5b).
+        let mut created_files: Vec<String> = Vec::new();
+        let mut run_commands: Vec<(String, bool)> = Vec::new(); // (command, success)
+
         loop {
             let messages = self.snapshot().await;
             let req = ChatRequest {
@@ -757,6 +764,14 @@ impl Agent {
                     for (call, result) in clean_calls.iter().zip(results) {
                         match result {
                             Ok(res) => {
+                                // Track activity for end-of-run summary.
+                                Self::track_tool_result(
+                                    &call.name,
+                                    &call.arguments,
+                                    &res.content,
+                                    &mut created_files,
+                                    &mut run_commands,
+                                );
                                 self.push(Message::tool_result(
                                     call.id.clone(),
                                     res.content.clone(),
@@ -820,6 +835,14 @@ impl Agent {
                             .await;
                         match self.execute_tool(call, run_id, &tx).await {
                             Ok(res) => {
+                                // Track activity for end-of-run summary.
+                                Self::track_tool_result(
+                                    &call.name,
+                                    &call.arguments,
+                                    &res.content,
+                                    &mut created_files,
+                                    &mut run_commands,
+                                );
                                 self.push(Message::tool_result(
                                     call.id.clone(),
                                     res.content.clone(),
@@ -860,11 +883,11 @@ impl Agent {
                 for chunk in text_chunks {
                     let _ = tx.send(AgentEvent::Text(chunk)).await;
                 }
-            } else if text.trim().is_empty() {
-                // Model returned an empty response (common with small local models
-                // after completing tool execution). Emit a minimal done indicator
-                // so the agent bubble is never left blank.
-                let _ = tx.send(AgentEvent::Text("✓ Done.\n".to_string())).await;
+            } else {
+                // Model returned empty text. Generate an automatic summary from
+                // what the agent actually did during this run.
+                let summary = Self::build_run_summary(&created_files, &run_commands);
+                let _ = tx.send(AgentEvent::Text(summary)).await;
             }
             let _ = tx.send(AgentEvent::Done { finish_reason }).await;
             break;
@@ -1314,6 +1337,90 @@ impl Agent {
         }
 
         tool.run(&args, &self.cwd)
+    }
+
+    /// Record a completed tool call into the run-level activity trackers.
+    /// Called after every successful tool execution.
+    fn track_tool_result(
+        name: &str,
+        arguments: &str,
+        result_content: &str,
+        created_files: &mut Vec<String>,
+        run_commands: &mut Vec<(String, bool)>,
+    ) {
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+
+        match name {
+            "write_file" | "patch_file" | "create_dir" => {
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    let entry = path.to_string();
+                    if !created_files.contains(&entry) {
+                        created_files.push(entry);
+                    }
+                }
+            }
+            "run_command" | "shell_exec" => {
+                let cmd = args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
+                // Treat exit_code 0 or absence of "error"/"Error"/"failed" as success.
+                let success = !result_content.to_lowercase().contains("error")
+                    && !result_content.to_lowercase().contains("failed")
+                    || result_content.contains("exit_code: 0")
+                    || result_content.contains("\"exit_code\":0");
+                run_commands.push((cmd, success));
+            }
+            "run_tests" => {
+                let success = result_content.contains("test result: ok")
+                    || result_content.contains("passed")
+                    || (!result_content.to_lowercase().contains("failed")
+                        && !result_content.to_lowercase().contains("error"));
+                run_commands.push(("run_tests".to_string(), success));
+            }
+            _ => {}
+        }
+    }
+
+    /// Build a human-readable summary of what the agent did during this run.
+    /// Used as fallback when the model returns an empty final response.
+    fn build_run_summary(
+        created_files: &[String],
+        run_commands: &[(String, bool)],
+    ) -> String {
+        if created_files.is_empty() && run_commands.is_empty() {
+            return "✓ Done.\n".to_string();
+        }
+
+        let mut out = String::from("✓ Done. Here's what was created:\n\n");
+
+        if !created_files.is_empty() {
+            out.push_str("Files created/modified:\n");
+            for f in created_files {
+                out.push_str(&format!("  {f}\n"));
+            }
+        }
+
+        if !run_commands.is_empty() {
+            if !created_files.is_empty() {
+                out.push('\n');
+            }
+            out.push_str("Commands run:\n");
+            for (cmd, success) in run_commands {
+                let icon = if *success { "✓" } else { "✗" };
+                // Truncate long commands for readability.
+                let display = if cmd.len() > 60 {
+                    format!("{}…", &cmd[..60])
+                } else {
+                    cmd.clone()
+                };
+                out.push_str(&format!("  {icon} {display}\n"));
+            }
+        }
+
+        out
     }
 }
 
