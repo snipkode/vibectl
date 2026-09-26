@@ -187,7 +187,13 @@ async fn handle_app_msg(msg_tx: &mpsc::Sender<Msg>, app: &mut App, msg: AppMsg) 
             }
         }
         AppMsg::Plan(p) => {
-            app.finish_run(None);
+            // Only finish_run if we're actually still busy with a plan-only task
+            // (i.e. /plan command, not auto-plan mid-run).  Auto-plan sends Plan
+            // then continues executing — calling finish_run here would mark the
+            // agent as idle prematurely and create phantom "✓ Done." bubbles.
+            if !app.busy {
+                app.finish_run(None);
+            }
             app.push_plan(p);
         }
         AppMsg::Implementation(s) => {

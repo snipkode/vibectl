@@ -529,6 +529,10 @@ impl Agent {
         // hallucinates tool names it was never given.
         let mut hallucination_retries = 0u8;
         const MAX_HALLUCINATION_RETRIES: u8 = 3;
+        // Guard against infinite loops when the model keeps returning empty
+        // responses or cycling without making progress.
+        let mut loop_iterations = 0u8;
+        const MAX_LOOP_ITERATIONS: u8 = 20;
 
         // ── Run-level activity tracker ─────────────────────────────────────────
         // Accumulates what the agent actually did so we can generate a summary
@@ -538,6 +542,21 @@ impl Agent {
         let mut run_commands: Vec<(String, bool)> = Vec::new(); // (command, success)
 
         loop {
+            loop_iterations += 1;
+            if loop_iterations > MAX_LOOP_ITERATIONS {
+                let _ = tx
+                    .send(AgentEvent::Text(
+                        "Agent loop limit reached. Stopping.\n".to_string(),
+                    ))
+                    .await;
+                let _ = tx
+                    .send(AgentEvent::Done {
+                        finish_reason: Some("loop_limit".to_string()),
+                    })
+                    .await;
+                return Ok(());
+            }
+
             let messages = self.snapshot().await;
 
             // Build a compact tool-name reminder to inject as system context.
