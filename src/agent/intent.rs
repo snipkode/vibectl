@@ -255,12 +255,24 @@ const TASK_VERBS: &[&str] = &[
     "initialize ",
     "setup ",
     "buat ",
+    "buatkan",
     "tambah ",
-    "tambahkan ",
-    "perbaiki ",
+    "tambahkan",
+    "perbaiki",
     "tulis ",
+    "tuliskan",
     "bikin ",
+    "bikinkan",
     "implementasi ",
+    "implementasikan",
+    "integrasikan",
+    "generate ",
+    "generatekan",
+    "scaffoldkan",
+    "setup ",
+    "setupkan",
+    "install ",
+    "inisialisasi",
 ];
 
 const QUESTION_STARTERS: &[&str] = &[
@@ -415,7 +427,10 @@ pub fn intent_rules(input: &str) -> Option<Intent> {
     if has_task && has_file {
         return Some(Intent::CodeWrite);
     }
-    if has_task && word_count > 4 {
+    // word_count >= 4: "buatkan api express" (3 words with task verb),
+    // "buat project baru" (3 words), "create rest api" (3 words) etc.
+    // Previously this was `> 4` which missed 3-4 word task phrases.
+    if has_task && word_count >= 3 {
         return Some(Intent::CodeWrite);
     }
 
@@ -455,6 +470,12 @@ pub async fn classify_intent_llm(input: &str, model: &str, provider: Arc<dyn Pro
          - shell_exec: run build/test/lint command, execute script\n\
          - git: git commit/push/pull/branch/diff/stash/merge\n\
          - deploy: deploy to environment, run DB migration, push docker image\n\n\
+         IMPORTANT: Any request to CREATE or BUILD something is code_write, not informational.\n\
+         Indonesian task words → code_write: buatkan, buat, bikin, bikinkan, tambah, tambahkan,\n\
+         perbaiki, tulis, implementasi, implementasikan, buat project, bikin api, buatkan server.\n\
+         Example: \"buatkan api express\" → code_write\n\
+         Example: \"buat project node\" → code_write\n\
+         Example: \"bikin rest api\" → code_write\n\n\
          Message: {input}"
     );
 
@@ -580,6 +601,16 @@ mod tests {
             r("tambahkan error handling di config.rs"),
             Some(Intent::CodeWrite)
         );
+        // Short Indonesian task phrases (3-4 words) must not fall through to Conversational
+        assert_eq!(r("buatkan api express"), Some(Intent::CodeWrite));
+        assert_eq!(r("buatkan api expresss"), Some(Intent::CodeWrite));
+        assert_eq!(r("bikin rest api"), Some(Intent::CodeWrite));
+        assert_eq!(r("bikinkan crud endpoint"), Some(Intent::CodeWrite));
+        assert_eq!(r("buat project node"), Some(Intent::CodeWrite));
+        assert_eq!(r("tambahkan endpoint login"), Some(Intent::CodeWrite));
+        assert_eq!(r("perbaiki bug auth"), Some(Intent::CodeWrite));
+        assert_eq!(r("create rest api"), Some(Intent::CodeWrite));
+        assert_eq!(r("build express server"), Some(Intent::CodeWrite));
     }
 
     #[test]
