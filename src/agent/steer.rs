@@ -226,6 +226,11 @@ EVIDENCE TAGGING — for claims about the codebase
 AVAILABLE TOOLS
 ═══════════════════════════════════════════════════════════════
 
+████ CRITICAL ████ Only use the EXACT tool names listed below.
+DO NOT invent tool names like "create_rest_api", "install_dependencies",
+"scaffold_project", "create_project", or any other name not in this list.
+Those tools do not exist. Using them will cause an error.
+
 Read-only (no approval needed):
   read_file      — read file contents (offset/limit supported)
   read_symbol    — extract a named symbol's full source with line numbers

@@ -568,10 +568,38 @@ impl Agent {
             // ── Fallback: parse JSON tool calls from plain text ────────────────
             // Some models (qwen2.5-coder:1.5b, llama3.2, etc.) output tool calls
             // as JSON text instead of structured tool_calls. Parse and execute them.
+            // Only accept tool names that are actually registered — reject hallucinated tools.
             if clean_calls.is_empty() && !text.trim().is_empty() {
-                let fallback = extract_tool_calls_from_text(&text, run_id);
-                if !fallback.is_empty() {
-                    clean_calls = fallback;
+                let known_names: std::collections::HashSet<String> = self
+                    .tool_impls
+                    .iter()
+                    .map(|t| t.def().name.clone())
+                    .collect();
+                let parsed = extract_tool_calls_from_text(&text, run_id);
+                let (valid, invalid): (Vec<_>, Vec<_>) =
+                    parsed.into_iter().partition(|c| known_names.contains(&c.name));
+
+                // Tell the model about hallucinated tool names so it can correct itself.
+                if !invalid.is_empty() {
+                    let names: Vec<&str> = invalid.iter().map(|c| c.name.as_str()).collect();
+                    let available: Vec<String> = {
+                        let mut v: Vec<String> = known_names.into_iter().collect();
+                        v.sort();
+                        v
+                    };
+                    let feedback = format!(
+                        "ERROR: Unknown tool(s): {}.\n\
+                         Available tools: {}.\n\
+                         Use ONLY the listed tool names. Do not invent new tool names.",
+                        names.join(", "),
+                        available.join(", ")
+                    );
+                    let _ = tx.send(AgentEvent::Text(format!("[tool error: {}]\n", feedback))).await;
+                    self.push(Message::user(feedback)).await;
+                }
+
+                if !valid.is_empty() {
+                    clean_calls = valid;
                 }
             }
 
