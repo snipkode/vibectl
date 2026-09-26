@@ -183,6 +183,8 @@ pub struct App {
     pub run_handle: Option<JoinHandle<()>>,
     pub running_tool: Option<String>,
     pub active_assistant: Option<usize>,
+    /// Index of the most recent pending tool message (updated in-place by tool_end).
+    pub active_tool_msg: Option<usize>,
     pub last_status: String,
     pub pending_approval: Option<String>,
     pub pending_approval_tx: Option<oneshot::Sender<bool>>,
@@ -234,6 +236,7 @@ impl App {
             run_handle: None,
             running_tool: None,
             active_assistant: None,
+            active_tool_msg: None,
             last_status: String::new(),
             pending_approval: None,
             pending_approval_tx: None,
@@ -621,18 +624,36 @@ impl App {
     }
 
     pub fn tool_start(&mut self, name: String) {
-        self.running_tool = Some(name);
+        self.running_tool = Some(name.clone());
+        // Show the tool call immediately as a pending entry so the user sees
+        // live progress — replaced by the full result in tool_end.
+        self.messages.push(MessageItem::tool(
+            name,
+            "running…".to_string(),
+            true,
+        ));
+        // Track index so tool_end can update it in-place.
+        self.active_tool_msg = Some(self.messages.len() - 1);
     }
 
     pub fn tool_end(&mut self, name: String, ok: bool, content: String) {
         self.running_tool = None;
-        self.push_tool(name, content, ok);
+        // Update in-place if we have the index, otherwise append.
+        if let Some(idx) = self.active_tool_msg.take()
+            && idx < self.messages.len()
+        {
+            self.messages[idx].text = content;
+            self.messages[idx].ok = ok;
+        } else {
+            self.push_tool(name, content, ok);
+        }
     }
 
     pub fn finish_run(&mut self, status: Option<String>) {
         self.busy = false;
         self.running_tool = None;
         self.active_assistant = None;
+        self.active_tool_msg = None;
         self.pending_approval = None;
         self.pending_approval_tx = None;
         self.run_handle = None;

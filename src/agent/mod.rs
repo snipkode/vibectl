@@ -640,8 +640,22 @@ impl Agent {
                     names.join(", "),
                     available.join(", ")
                 );
-                // Use system role so the model treats this as a runtime correction,
-                // not a user message — prevents the "I apologize..." conversational response.
+                // Show the hallucinated tool call in the UI as an error entry
+                // so the user can see what the model attempted.
+                for call in &structured_invalid {
+                    let _ = tx.send(AgentEvent::ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                    }).await;
+                    let _ = tx.send(AgentEvent::ToolError {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        error: format!(
+                            "Unknown tool '{}' — retrying with valid tools",
+                            call.name
+                        ),
+                    }).await;
+                }
                 self.push(Message::assistant_tool_calls_with_text(
                     structured_invalid.clone(),
                     String::new(),
