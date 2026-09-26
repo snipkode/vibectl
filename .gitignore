@@ -9,6 +9,8 @@ node_modules/
 # Specs are the opposite: requirements, design, and the task list are meant to
 # be reviewed in a pull request, so they are committed.
 !.vibectl/specs/
+# Steering files teach the agent about the project — they belong in the repo.
+!.vibectl/steering/
 
 # Telemetry / caches from local runs — 1.2MB of LMDB and JSONL that must
 # never end up in the repo.
