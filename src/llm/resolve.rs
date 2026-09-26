@@ -80,30 +80,6 @@ pub fn resolve_provider(cfg: &ProviderConfig, model: &str) -> Result<Arc<dyn Pro
         .unwrap_or_else(|| "http://localhost:11434".to_string());
     Ok(Ollama::provider(base))
 }
-
-pub fn provider_name(cfg: &ProviderConfig, model: &str) -> String {
-    // Must mirror resolve_provider's case handling, or the header shows the
-    // wrong provider for a model like "GPT-4o" that actually routes to OpenAI.
-    let lower = model.to_lowercase();
-    if lower.starts_with("claude") {
-        "anthropic".to_string()
-    } else if lower.starts_with("gpt") {
-        "openai".to_string()
-    } else if cfg
-        .custom_providers
-        .iter()
-        .any(|p| p.models.iter().any(|m| m.to_lowercase() == lower))
-    {
-        cfg.custom_providers
-            .iter()
-            .find(|p| p.models.iter().any(|m| m.to_lowercase() == lower))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "ollama".to_string())
-    } else {
-        "ollama".to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,20 +92,26 @@ mod tests {
         }
     }
 
+    fn label(cfg: &ProviderConfig, model: &str) -> String {
+        resolve_provider(cfg, model)
+            .expect("resolve")
+            .name()
+            .to_string()
+    }
+
     #[test]
     fn model_prefix_selects_the_provider() {
-        assert_eq!(
-            provider_name(&cfg(), "claude-sonnet-4-20250514"),
-            "anthropic"
-        );
-        assert_eq!(provider_name(&cfg(), "gpt-4o"), "openai");
-        assert_eq!(provider_name(&cfg(), "llama3.2"), "ollama");
+        assert_eq!(label(&cfg(), "claude-sonnet-4-20250514"), "anthropic");
+        assert_eq!(label(&cfg(), "gpt-4o"), "openai");
+        assert_eq!(label(&cfg(), "llama3.2"), "ollama");
     }
 
     #[test]
     fn prefix_matching_is_case_insensitive() {
-        assert_eq!(provider_name(&cfg(), "GPT-4o"), "openai");
-        assert_eq!(provider_name(&cfg(), "Claude-3"), "anthropic");
+        // resolve_provider lowercases before testing the prefix, so the
+        // reported provider has to follow the same model.
+        assert_eq!(label(&cfg(), "GPT-4o"), "openai");
+        assert_eq!(label(&cfg(), "Claude-3"), "anthropic");
     }
 
     #[test]
@@ -141,17 +123,13 @@ mod tests {
             api_key: None,
             models: vec!["house-model".into()],
         }];
-        assert_eq!(provider_name(&c, "house-model"), "internal");
-        assert_eq!(
-            provider_name(&c, "gpt-4o"),
-            "openai",
-            "others are unaffected"
-        );
+        assert_eq!(label(&c, "house-model"), "internal");
+        assert_eq!(label(&c, "gpt-4o"), "openai", "others are unaffected");
     }
 
     #[test]
     fn unknown_model_falls_back_to_ollama() {
-        assert_eq!(provider_name(&cfg(), "some-unknown-model"), "ollama");
+        assert_eq!(label(&cfg(), "some-unknown-model"), "ollama");
     }
 
     #[test]
@@ -192,10 +170,8 @@ mod tests {
     #[test]
     fn provider_construction_does_not_require_network_access() {
         // Resolution must stay offline so the TUI can start without a network.
-        let provider = resolve_provider(&cfg(), "gpt-4o").expect("resolve");
-        assert_eq!(provider.name(), "openai");
-        let provider = resolve_provider(&cfg(), "claude-sonnet-4").expect("resolve");
-        assert_eq!(provider.name(), "anthropic");
+        assert_eq!(label(&cfg(), "gpt-4o"), "openai");
+        assert_eq!(label(&cfg(), "claude-sonnet-4"), "anthropic");
     }
 
     #[test]

@@ -179,7 +179,6 @@ pub type ChunkStream = futures::stream::BoxStream<'static, Result<ChatChunk>>;
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    #[allow(dead_code)]
     fn name(&self) -> &str;
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse>;
     async fn chat_stream(&self, req: &ChatRequest) -> Result<ChunkStream>;

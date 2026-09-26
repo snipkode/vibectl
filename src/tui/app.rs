@@ -9,6 +9,7 @@ pub const HELP_TEXT: &str = "\
 
   Sending
   ────────────────────────────────────────────────
+  Send message while a task is running = queued, sent when it finishes
   Enter          Send message
   Shift+Enter    Insert newline
   Ctrl+Enter     Send multiline message
@@ -20,7 +21,8 @@ pub const HELP_TEXT: &str = "\
   ────────────────────────────────────────────────
   ↑ / ↓          Input history
   PgUp / PgDn    Scroll conversation
-  Scroll wheel   Scroll conversation
+  Scroll wheel   Scroll conversation (mouse capture on)
+  Alt+C or /copy Toggle copy mode (select/copy text with mouse)
   Ctrl+L         Jump to latest message
   Esc            Close help / cancel
 
@@ -113,6 +115,14 @@ impl MessageItem {
             ..Self::new(MsgRole::Plan, text)
         }
     }
+    /// Grouped summary of files the agent intends to create/update,
+    /// shown as a "Implementation" bubble before the confirm prompt.
+    pub fn implement(text: String) -> Self {
+        Self {
+            kind: Some("Implementation".into()),
+            ..Self::new(MsgRole::Plan, text)
+        }
+    }
 }
 
 /// Entry in the @ file dropdown.
@@ -138,6 +148,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("/steer", "Append rule to steer.md", "/steer <rule>"),
     ("/cfg", "Print effective config", "/cfg"),
     ("/provider", "Show provider + model info", "/provider"),
+    ("/copy", "Toggle copy mode (mouse selection)", "/copy"),
     ("/quit", "Exit vibectl", "/quit"),
 ];
 
@@ -177,6 +188,11 @@ pub struct App {
     pub at_query: String,
     /// Tagged file paths that will be injected into the next prompt
     pub at_tagged: Vec<std::path::PathBuf>,
+    /// Messages typed while the agent is busy — delivered one at a time
+    /// after the current run finishes.
+    pub queued_input: Vec<String>,
+    /// When true, mouse capture is off so terminal text can be selected/copied.
+    pub copy_mode: bool,
     /// Set to true to trigger graceful exit after terminal cleanup.
     pub should_quit: bool,
 }
@@ -215,6 +231,8 @@ impl App {
             at_visible: false,
             at_query: String::new(),
             at_tagged: vec![],
+            queued_input: vec![],
+            copy_mode: false,
             should_quit: false,
         }
     }
@@ -531,6 +549,15 @@ impl App {
         self.messages.push(MessageItem::user(text));
     }
 
+    /// Queue a message asked while the agent is busy.
+    /// Shows it as a user bubble immediately; the agent receives it as a
+    /// follow-up turn once the current run ends. Returns the queue length.
+    pub fn queue_input(&mut self, text: String) -> usize {
+        self.push_user(text.clone());
+        self.queued_input.push(text);
+        self.queued_input.len()
+    }
+
     #[allow(dead_code)]
     pub fn push_assistant(&mut self, text: String) {
         self.messages.push(MessageItem::assistant(text));
@@ -550,6 +577,10 @@ impl App {
 
     pub fn push_plan(&mut self, text: String) {
         self.messages.push(MessageItem::plan(text));
+    }
+
+    pub fn push_implement(&mut self, text: String) {
+        self.messages.push(MessageItem::implement(text));
     }
 
     pub fn begin_run(&mut self) {

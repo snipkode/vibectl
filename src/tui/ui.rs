@@ -572,15 +572,37 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     // ── Hint bar (row 3, outside box) ─────────────────────────────────────────
-    let hint_line: Line = if app.busy {
+    let hint_line: Line = if app.copy_mode {
         Line::from(vec![
+            Span::styled(
+                "  COPY MODE — select text ",
+                Style::default()
+                    .fg(C_AGENT_MARK)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("· ", Style::default().fg(C_BORDER)),
+            Span::styled("PgUp/PgDn scroll ", Style::default().fg(C_HINT)),
+            Span::styled("· ", Style::default().fg(C_BORDER)),
+            Span::styled("Alt+C or /copy ", Style::default().fg(C_HINT)),
+            Span::styled("to exit", Style::default().fg(C_HINT)),
+        ])
+    } else if app.busy {
+        let mut spans = vec![
             Span::styled(
                 format!("  {} working… ", spinner_char(app)),
                 Style::default().fg(C_TOOL_MARK),
             ),
             Span::styled("Ctrl+C ", Style::default().fg(C_ERROR_MARK)),
             Span::styled("to cancel", Style::default().fg(C_HINT)),
-        ])
+        ];
+        if !app.queued_input.is_empty() {
+            spans.push(Span::styled("  ·  ", Style::default().fg(C_BORDER)));
+            spans.push(Span::styled(
+                format!("⏷ {} queued", app.queued_input.len()),
+                Style::default().fg(C_AGENT_MARK),
+            ));
+        }
+        Line::from(spans)
     } else if app.input.chars().any(|c| c == '\n') {
         // multiline state
         Line::from(vec![
@@ -595,8 +617,8 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("  ·  ", Style::default().fg(C_BORDER)),
             Span::styled("Ctrl+K", Style::default().fg(C_HINT)),
             Span::styled("  ·  ", Style::default().fg(C_BORDER)),
-            Span::styled("↑↓", Style::default().fg(C_HINT)),
-            Span::styled("  history", Style::default().fg(C_HINT)),
+            Span::styled("Alt+C", Style::default().fg(C_HINT)),
+            Span::styled("  copy", Style::default().fg(C_HINT)),
         ])
     };
 
@@ -872,8 +894,24 @@ fn render_approval_modal(frame: &mut Frame, app: &App) {
     };
 
     let area = frame.area();
-    let modal_w = area.width.clamp(44, 78);
-    let modal_h: u16 = 7;
+    let modal_w = area.width.clamp(44, 84);
+    let inner_w = modal_w.saturating_sub(4) as usize; // borders + 1 col pad per side
+
+    // Body lines, capped; height grows with content (scaffold summaries/diffs).
+    let raw_lines: Vec<String> = cmd.lines().map(|l| l.to_string()).collect();
+    let max_body = 18usize;
+    let wrapped_body: usize = raw_lines
+        .iter()
+        .take(max_body)
+        .map(|l| {
+            (l.chars().count().saturating_add(inner_w - 2)).div_ceil(inner_w.saturating_sub(2))
+        })
+        .sum();
+    let body_h = wrapped_body.min(20);
+
+    let modal_h: u16 = ((body_h as u16) + 3)
+        .clamp(8, 30)
+        .min(area.height.saturating_sub(2));
     let modal = Rect {
         x: area.width.saturating_sub(modal_w) / 2,
         y: area.height.saturating_sub(modal_h) / 2,
@@ -898,43 +936,51 @@ fn render_approval_modal(frame: &mut Frame, app: &App) {
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
 
-    let max_cmd_w = inner.width as usize - 2;
-    let truncated: String = if cmd.chars().count() > max_cmd_w {
-        format!("{}…", cmd.chars().take(max_cmd_w - 1).collect::<String>())
-    } else {
-        cmd.clone()
-    };
+    // body (fills) + footer (1 row, always visible)
+    let [body_rect, footer_rect] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
-    let lines = vec![
-        Line::raw(""),
-        Line::from(Span::styled(
-            format!("  {truncated}"),
+    let omitted = raw_lines.len().saturating_sub(max_body);
+    let mut body_lines: Vec<Line> = Vec::new();
+    for raw in raw_lines.iter().take(max_body) {
+        body_lines.push(Line::from(Span::styled(
+            format!("  {raw}"),
             Style::default().fg(Color::White),
-        )),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled(
-                "  [y] ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Allow    ", Style::default().fg(C_HDR_META)),
-            Span::styled(
-                "[n] ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Deny    ", Style::default().fg(C_HDR_META)),
-            Span::styled("[Esc] ", Style::default().fg(C_HINT)),
-            Span::styled("Cancel", Style::default().fg(C_HINT)),
-        ]),
-    ];
+        )));
+    }
+    if omitted > 0 {
+        body_lines.push(Line::from(Span::styled(
+            format!("  … (+{omitted} more lines — scroll to view in chat)"),
+            Style::default().fg(C_HINT),
+        )));
+    }
 
     frame.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(body_lines)
             .wrap(Wrap { trim: false })
             .style(Style::default().bg(C_SURFACE2)),
-        inner,
+        body_rect,
+    );
+
+    let footer_line = Line::from(vec![
+        Span::styled(
+            "  [y] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Allow    ", Style::default().fg(C_HDR_META)),
+        Span::styled(
+            "[n] ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Deny    ", Style::default().fg(C_HDR_META)),
+        Span::styled("[Esc] ", Style::default().fg(C_HINT)),
+        Span::styled("Cancel", Style::default().fg(C_HINT)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(footer_line).style(Style::default().bg(C_SURFACE2)),
+        footer_rect,
     );
 }
 
@@ -1111,7 +1157,8 @@ fn append_system(rows: &mut Vec<Line<'static>>, msg: &crate::tui::app::MessageIt
 }
 
 fn append_plan(rows: &mut Vec<Line<'static>>, msg: &crate::tui::app::MessageItem) {
-    rows.push(bubble_header(C_PLAN_MARK, "Plan", &msg.ts, 60));
+    let label = msg.kind.as_deref().unwrap_or("Plan");
+    rows.push(bubble_header(C_PLAN_MARK, label, &msg.ts, 60));
     let body_lines = markdown_to_lines(&msg.text, Style::default().fg(C_PLAN_TEXT));
     for line in body_lines {
         rows.push(bubble_line(C_PLAN_MARK, line.spans));
@@ -1125,17 +1172,18 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
     let mut in_code = false;
     let mut code_buf: Vec<String> = Vec::new();
     let mut lang = String::new();
+    let mut table_buf: Vec<String> = Vec::new();
 
     for src in md.lines() {
         let trimmed = src.trim();
 
-        if trimmed.starts_with("```") {
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             if in_code {
                 flush_code_block(&mut code_buf, &mut lines, &lang);
                 lang.clear();
                 in_code = false;
             } else {
-                lang = trimmed.trim_start_matches('`').to_string();
+                lang = trimmed.trim_start_matches(['`', '~']).to_string();
                 in_code = true;
             }
             continue;
@@ -1146,8 +1194,17 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
             continue;
         }
 
+        // Accumulate consecutive pipe-table rows, then render them as a block.
+        if is_table_line(trimmed) {
+            table_buf.push(trimmed.to_string());
+            continue;
+        }
+        flush_table(&mut table_buf, &mut lines, base);
+
         let line = if let Some(rest) = trimmed
-            .strip_prefix("### ")
+            .strip_prefix("##### ")
+            .or_else(|| trimmed.strip_prefix("#### "))
+            .or_else(|| trimmed.strip_prefix("### "))
             .or_else(|| trimmed.strip_prefix("## "))
             .or_else(|| trimmed.strip_prefix("# "))
         {
@@ -1174,9 +1231,28 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
         {
-            let mut inline = vec![Span::styled("• ", Style::default().fg(C_AGENT_MARK))];
-            inline.extend(parse_inline(rest, base));
+            let mut inline;
+            if let Some(item) = rest
+                .strip_prefix("[x] ")
+                .or_else(|| rest.strip_prefix("[X] "))
+            {
+                inline = vec![Span::styled(
+                    "☑ ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                inline.extend(parse_inline(item, base));
+            } else if let Some(item) = rest.strip_prefix("[ ] ") {
+                inline = vec![Span::styled("☐ ", Style::default().fg(C_BORDER))];
+                inline.extend(parse_inline(item, base));
+            } else {
+                inline = vec![Span::styled("• ", Style::default().fg(C_AGENT_MARK))];
+                inline.extend(parse_inline(rest, base));
+            }
             Line::from(inline)
+        } else if trimmed.starts_with('[') {
+            markdown_inline(src, base)
         } else if trimmed
             .chars()
             .next()
@@ -1203,6 +1279,7 @@ fn markdown_to_lines(md: &str, base: Style) -> Vec<Line<'static>> {
         lines.push(line);
     }
     flush_code_block(&mut code_buf, &mut lines, &lang);
+    flush_table(&mut table_buf, &mut lines, base);
 
     while lines
         .last()
@@ -1240,6 +1317,65 @@ fn flush_code_block(buf: &mut Vec<String>, lines: &mut Vec<Line<'static>>, lang:
     lines.push(Line::raw(""));
 }
 
+fn is_table_line(l: &str) -> bool {
+    l.contains('|') && l.matches('|').count() >= 2
+}
+
+fn is_table_separator_row(l: &str) -> bool {
+    let cells: Vec<&str> = l
+        .split('|')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')) && c.contains('-')
+        })
+}
+
+fn split_table_cells(l: &str) -> Vec<String> {
+    l.split('|')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+fn flush_table(buf: &mut Vec<String>, lines: &mut Vec<Line<'static>>, base: Style) {
+    if buf.is_empty() {
+        return;
+    }
+    let rows: Vec<String> = std::mem::take(buf);
+    for (i, row) in rows.iter().enumerate() {
+        if is_table_separator_row(row) {
+            lines.push(Line::from(Span::styled(
+                "│ ────────── │".to_string(),
+                Style::default()
+                    .fg(C_BORDER_BRIGHT)
+                    .add_modifier(Modifier::DIM),
+            )));
+            continue;
+        }
+        let cells = split_table_cells(row);
+        // The row right before a separator row is the table header.
+        let is_header = i + 1 < rows.len() && is_table_separator_row(&rows[i + 1]);
+        let cell_style = if is_header {
+            base.add_modifier(Modifier::BOLD)
+        } else {
+            base
+        };
+        let mut spans = vec![Span::styled("│ ", Style::default().fg(C_BORDER_BRIGHT))];
+        for (ci, cell) in cells.iter().enumerate() {
+            spans.push(Span::styled(cell.clone(), cell_style));
+            if ci < cells.len() - 1 {
+                spans.push(Span::styled(" │ ", Style::default().fg(C_BORDER_BRIGHT)));
+            }
+        }
+        spans.push(Span::styled(" │", Style::default().fg(C_BORDER_BRIGHT)));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::raw(""));
+}
+
 fn markdown_inline(src: &str, base: Style) -> Line<'static> {
     let spans = parse_inline(src, base);
     if spans.is_empty() {
@@ -1253,6 +1389,20 @@ fn parse_inline(src: &str, base: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = src;
     while !rest.is_empty() {
+        // [label](url)
+        if rest.starts_with('[')
+            && let Some(close) = rest.find(']')
+            && let Some(url_rest) = rest[close + 1..].strip_prefix('(')
+            && let Some(paren) = url_rest.find(')')
+        {
+            let label = &rest[1..close];
+            spans.push(Span::styled(
+                label.to_string(),
+                base.add_modifier(Modifier::UNDERLINED).fg(C_HDR_LOGO),
+            ));
+            rest = &url_rest[paren + 1..];
+            continue;
+        }
         // Each marker needs a *non-empty* body: an empty span would consume the
         // marker without emitting text, so "**" on its own rendered as nothing.
         if rest.starts_with('`')
@@ -1371,7 +1521,11 @@ fn tool_icon(name: &str) -> &'static str {
         "⎇"
     } else if name.contains("web") || name.contains("fetch") {
         "⇱"
-    } else if name.contains("shell") || name.contains("exec") {
+    } else if name.contains("test") {
+        "✓"
+    } else if name.contains("dir") {
+        "▸"
+    } else if name.contains("shell") || name.contains("exec") || name.contains("command") {
         "$"
     } else {
         "○"

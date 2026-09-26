@@ -24,7 +24,7 @@ An autonomous terminal coding agent. Chat with an AI that reads, writes, and sea
 - **`vibectl audit`** — scan repo, detect languages, inventory features, flag security gaps, list unknowns
 - **Plan mode** — generate and save a step-by-step plan to `.vibectl/PLAN.md`
 - **Headless / CI mode** — non-interactive, pipeable, scriptable
-- **Tools**: `read_file`, `write_file`, `patch_file`, `glob`, `grep`, `list_symbols`, `git`, `shell_exec`, `web_fetch`
+- **Tools**: `read_file`, `write_file`, `patch_file`, `create_dir`, `glob`, `grep`, `list_symbols`, `git`, `shell_exec`, `run_command`, `run_tests`, `web_fetch`
 - **AST symbol index** — `list_symbols` parses Rust/Python/JS/TS/Go with tree-sitter instead of grepping
 - **Path sandbox** — every file access is confined to the project root; `..` traversal and symlink escapes are refused
 - **Retry with backoff** — 429/5xx are retried with exponential backoff, honouring `Retry-After`; 4xx fails fast
@@ -112,7 +112,7 @@ All filesystem tools are confined to the detected project root. `read_file` incl
 
 Traversal (`../../etc/passwd`) and symlink escapes (a directory inside the project linking to `/etc`) are both refused. Lift it with `allow_any_path: true`, or per-run with `--dangerous-yes` in headless mode.
 
-`shell_exec` is **not** filtered by the sandbox — it is gated only by the approval prompt, so `--dangerous-yes` gives the agent unrestricted shell access. Treat it accordingly.
+`shell_exec`, `run_command` and `run_tests` are **not** filtered by the sandbox — they are gated only by the approval prompt, so `--dangerous-yes` gives the agent unrestricted process execution. Treat it accordingly.
 
 Override model via env: `VIBECTL_MODEL=gpt-4o-mini vibectl`
 
@@ -258,9 +258,14 @@ There is no session persistence: `/new` clears the in-memory conversation, and c
 | `web_fetch` | Fetch and extract content from a URL | no |
 | `write_file` | Create or overwrite a file | yes |
 | `patch_file` | Apply a unified diff hunk | yes |
+| `create_dir` | Create a directory (for scaffolding) | yes |
 | `shell_exec` | Run any shell command | yes |
+| `run_command` | Run a command, returns exit code / stdout / stderr / duration | yes |
+| `run_tests` | Run the project's test suite (command auto-detected) | yes |
 
 The six read-only tools run without a prompt but are still confined to the project root. `patch_file` shows a diff preview before writing.
+
+The approval classification is enforced, not advisory: a tool listed as mutating is refused outright if it ever reaches the dispatcher without a prompt, so adding a tool cannot silently skip the gate.
 
 ## Project structure
 
@@ -283,16 +288,22 @@ src/
 │   ├── read_file.rs
 │   ├── write_file.rs
 │   ├── patch_file.rs  # unified-diff application
+│   ├── create_dir.rs  # directory scaffolding
 │   ├── symbols.rs     # tree-sitter AST symbol extraction
 │   ├── search.rs     # glob + grep
 │   ├── git.rs
-│   ├── shell.rs
+│   ├── shell.rs      # shell_exec + run_command + run_tests
 │   └── web.rs        # web_fetch
+├── workspace.rs      # project type detection + build/test command inference
 ├── agent/
 │   ├── mod.rs        # agent loop, tool dispatch, approval, run_id
 │   ├── intent.rs     # 7-way intent classification (rules + LLM fallback)
 │   ├── checkpoint.rs # git-stash checkpoints for /undo
-│   └── steer.rs      # discovery engine, DiscoveryReport, system prompt
+│   ├── steer.rs      # discovery engine, DiscoveryReport, system prompt
+│   ├── autonomous.rs # autonomous run loop
+│   ├── executor.rs   # grouped implementation with confirmation
+│   ├── validation.rs # post-change validation gates
+│   └── report.rs     # run reports
 └── tui/
     ├── mod.rs        # event loop, key handling, slash commands
     ├── app.rs        # app state, run_id, ctrl_c_count, @-mentions
@@ -304,7 +315,7 @@ src/
 
 ```sh
 cargo build --release
-cargo test              # 172 tests
+cargo test              # 183 tests
 cargo fmt --all
 cargo clippy --all-targets -- -D warnings
 ```

@@ -1,11 +1,8 @@
 /target
 node_modules/
 *.local
+.vibectl/
 
-# Telemetry / caches from local runs — never belongs in the repo.
+# Telemetry / caches from local runs — 1.2MB of LMDB and JSONL that must
+# never end up in the repo.
 .rust-code/
-.vibectl/cache/
-
-# Generated agent artifacts. Steering files under .vibectl/steering/ are meant
-# to be committed, but the working plan is per-developer state.
-.vibectl/PLAN.md

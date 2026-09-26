@@ -41,6 +41,7 @@ pub enum AppMsg {
     Done(u64),
     Error(u64, String),
     Plan(String),
+    Implementation(String),
     ApprovalRequested(String, oneshot::Sender<bool>),
     /// Graceful exit — cleanup terminal then quit.
     #[allow(dead_code)]
@@ -141,7 +142,7 @@ async fn run_loop(
             Msg::Tick => app.frame = app.frame.wrapping_add(1),
             Msg::Key(key) => handle_key(terminal, msg_tx, app, key).await?,
             Msg::Mouse(m) => handle_mouse(app, m),
-            Msg::App(m) => handle_app_msg(app, m).await,
+            Msg::App(m) => handle_app_msg(msg_tx, app, m).await,
         }
 
         if app.should_quit {
@@ -150,7 +151,7 @@ async fn run_loop(
     }
 }
 
-async fn handle_app_msg(app: &mut App, msg: AppMsg) {
+async fn handle_app_msg(msg_tx: &mpsc::Sender<Msg>, app: &mut App, msg: AppMsg) {
     match msg {
         AppMsg::Text(id, t) => {
             if id == app.run_id {
@@ -175,17 +176,22 @@ async fn handle_app_msg(app: &mut App, msg: AppMsg) {
         AppMsg::Done(id) => {
             if id == app.run_id {
                 app.finish_run(None);
+                drain_queue(msg_tx, app);
             }
         }
         AppMsg::Error(id, e) => {
             if id == app.run_id {
                 app.finish_run(None);
                 app.push_error(e);
+                drain_queue(msg_tx, app);
             }
         }
         AppMsg::Plan(p) => {
             app.finish_run(None);
             app.push_plan(p);
+        }
+        AppMsg::Implementation(s) => {
+            app.push_implement(s);
         }
         AppMsg::ApprovalRequested(cmd, otx) => {
             app.pending_approval = Some(cmd);
@@ -197,11 +203,58 @@ async fn handle_app_msg(app: &mut App, msg: AppMsg) {
     }
 }
 
+/// Deliver one queued message as a follow-up run once the agent is idle.
+fn spawn_drain_run(msg_tx: &mpsc::Sender<Msg>, app: &mut App) {
+    if app.busy || app.pending_approval.is_some() {
+        return;
+    }
+    if app.queued_input.is_empty() {
+        return;
+    }
+    let next = app.queued_input.remove(0);
+    let prompt = app.build_prompt_with_context(&next);
+    app.at_tagged.clear();
+    app.begin_run();
+    spawn_agent(msg_tx.clone(), app, prompt);
+}
+
+/// Deliver queued messages one at a time. Each run re-triggers via the next
+/// Done/Error event, so successive messages are processed as follow-up turns.
+fn drain_queue(msg_tx: &mpsc::Sender<Msg>, app: &mut App) {
+    spawn_drain_run(msg_tx, app);
+}
+
 fn handle_mouse(app: &mut App, m: MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollUp => app.scroll_up(3),
         MouseEventKind::ScrollDown => app.scroll_down(3),
         _ => {}
+    }
+}
+
+/// Toggle "copy mode": disables mouse capture (wheel scrolling off) so the
+/// user can select and copy terminal text with the mouse (or Shift+drag).
+fn set_copy_mode(app: &mut App, on: bool) {
+    if app.copy_mode == on {
+        return;
+    }
+    app.copy_mode = on;
+    let result = if on {
+        crossterm::execute!(io::stdout(), event::DisableMouseCapture)
+    } else {
+        crossterm::execute!(io::stdout(), event::EnableMouseCapture)
+    };
+    if result.is_err() {
+        app.push_error("failed to toggle copy mode".to_string());
+        return;
+    }
+    if on {
+        app.push_system(
+            "Copy mode ON — select text with mouse or arrow keys. PgUp/PgDn to scroll. Alt+C or /copy to exit."
+                .to_string(),
+        );
+    } else {
+        app.push_system("Copy mode OFF — mouse scrolling restored.".to_string());
     }
 }
 
@@ -275,6 +328,13 @@ async fn handle_key(
                 if typed.trim_start().starts_with('/') {
                     let text = app.submit();
                     handle_command(msg_tx, app, &text).await;
+                } else if !typed.trim().is_empty() {
+                    // Queue a follow-up ask; delivered when the current run ends.
+                    let text = app.submit();
+                    let n = app.queue_input(text);
+                    app.push_system(format!(
+                        "Queued ({n} pending) — will send after this task."
+                    ));
                 }
                 return Ok(());
             }
@@ -366,16 +426,26 @@ async fn handle_key(
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.follow_bottom();
         }
+        // Alt+C — toggle copy mode (disable mouse capture so text can be selected)
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.ctrl_c_count = 0;
+            set_copy_mode(app, !app.copy_mode);
+        }
         // Ctrl+K — toggle help (shown in hint bar)
         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.ctrl_c_count = 0;
             app.show_help = !app.show_help;
         }
-        KeyCode::Char('?') => {
+        // ? — toggle help ONLY if input is empty (so user can type ? in messages)
+        KeyCode::Char('?') if app.input.is_empty() => {
             app.ctrl_c_count = 0;
             app.show_help = !app.show_help;
         }
         KeyCode::Up => {
+            // In copy mode, let terminal handle arrow keys for text selection
+            if app.copy_mode {
+                return Ok(());
+            }
             if app.at_visible {
                 app.at_prev();
             } else if app.suggestion_visible {
@@ -385,6 +455,10 @@ async fn handle_key(
             }
         }
         KeyCode::Down => {
+            // In copy mode, let terminal handle arrow keys for text selection
+            if app.copy_mode {
+                return Ok(());
+            }
             if app.at_visible {
                 app.at_next();
             } else if app.suggestion_visible {
@@ -419,7 +493,7 @@ async fn handle_key(
         KeyCode::PageDown => app.scroll_down(10),
         KeyCode::Char(c) => {
             app.ctrl_c_count = 0;
-            if c == '@' && !app.busy {
+            if c == '@' {
                 app.insert_char(c);
                 app.trigger_at();
                 // hide / command suggestions
@@ -455,6 +529,7 @@ async fn handle_command(msg_tx: &mpsc::Sender<Msg>, app: &mut App, cmd: &str) {
 
     match name.as_str() {
         "/help" | "/?" => app.show_help = !app.show_help,
+        "/copy" => set_copy_mode(app, !app.copy_mode),
         "/quit" | "/exit" => {
             app.should_quit = true;
         }
@@ -571,7 +646,22 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
         while let Some(ev) = stream.recv().await {
             let msg = match ev {
                 AgentEvent::Plan(plan) => AppMsg::Plan(plan),
-                AgentEvent::Text(t) => AppMsg::Text(run_id, t),
+                AgentEvent::Implementation(s) => AppMsg::Implementation(s),
+                AgentEvent::Text(t) => {
+                    // Pass whitespace-only chunks through untouched — some models
+                    // (Llama via Ollama) stream spaces as separate chunks, and a
+                    // trim() on the filter would drop them, gluing words together.
+                    if t.trim().is_empty() {
+                        AppMsg::Text(run_id, t)
+                    } else {
+                        // Filter out JSON tool call patterns from text.
+                        let filtered = filter_tool_call_json(&t);
+                        if filtered.is_empty() {
+                            continue; // Skip text that was entirely a tool call
+                        }
+                        AppMsg::Text(run_id, filtered)
+                    }
+                },
                 AgentEvent::ToolCall { id: _, name } => AppMsg::ToolStart(run_id, name),
                 AgentEvent::ToolResult { name, content, .. } => AppMsg::ToolResult {
                     run_id,
@@ -593,6 +683,30 @@ fn spawn_agent(msg_tx: mpsc::Sender<Msg>, app: &mut App, prompt: String) {
             }
         }
     });
+}
+
+/// Filter out JSON tool call patterns from LLM text output.
+/// Some LLMs (e.g., Llama via Ollama) output tool calls as text instead of structured format.
+fn filter_tool_call_json(text: &str) -> String {
+    use regex::Regex;
+    
+    // Pattern: {"name":"...","parameters":{...}}
+    // This regex matches JSON objects with "name" and "parameters" keys
+    let re = Regex::new(r#"\{"name":"[^"]+","parameters":\{[^}]*\}\}"#).unwrap();
+    
+    // Also match variations with whitespace and escaped quotes
+    let re_complex = Regex::new(r#"\{[^}]*"name"[^}]*"parameters"[^}]*\}"#).unwrap();
+    
+    let mut result = text.to_string();
+    result = re.replace_all(&result, "").to_string();
+    result = re_complex.replace_all(&result, "").to_string();
+    
+    // Clean up multiple semicolons and extra whitespace left behind.
+    // NOTE: do NOT trim() here — a trim() strips leading/trailing whitespace
+    // from each streamed chunk, and Llama-style tokenizers put the preceding
+    // space at the START of every word token. Trimming would glue words together.
+    result = result.replace("};", "");
+    result
 }
 
 /// Extract the @ query from input: chars after the last '@' before the cursor.

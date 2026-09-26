@@ -1,6 +1,10 @@
+pub mod autonomous;
 pub mod checkpoint;
+pub mod executor;
 pub mod intent;
+pub mod report;
 pub mod steer;
+pub mod validation;
 
 use crate::tools::{Tool, ToolDef};
 use anyhow::{Context, Result};
@@ -12,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::llm::provider::{ChatRequest, Message, Provider, ToolCall, ToolCallDelta};
+use regex::Regex;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Approval {
@@ -28,6 +33,9 @@ pub trait Approver: Send + Sync {
 pub enum AgentEvent {
     /// Auto-generated plan emitted before execution for complex tasks.
     Plan(String),
+    /// Summary of intended file changes, emitted before execution so the
+    /// user can review it and confirm (or decline) the implementation.
+    Implementation(String),
     Text(String),
     ToolCall {
         id: String,
@@ -67,6 +75,9 @@ pub struct Agent {
     /// Tracks whether a checkpoint stash has been created for the current run.
     /// Reset to false by spawn_run so each run gets at most one checkpoint.
     checkpoint_taken: Arc<Mutex<bool>>,
+    /// Once the user confirms the grouped implementation summary, skips the
+    /// per-file approval dialogs for the rest of this run.
+    impl_confirmed: Arc<Mutex<bool>>,
     messages: Arc<Mutex<Vec<Message>>>,
 }
 
@@ -92,6 +103,7 @@ impl Agent {
             allow_any_path: false,
             auto_plan: true,
             checkpoint_taken: Arc::new(Mutex::new(false)),
+            impl_confirmed: Arc::new(Mutex::new(false)),
             messages: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -293,12 +305,74 @@ impl Agent {
         )
     }
 
+    /// Tools that implement code changes (write files to disk).
+    fn is_write_tool(name: &str) -> bool {
+        matches!(name, "write_file" | "patch_file")
+    }
+
+    /// Gate for code-implementation work. When the model wants to write or
+    /// patch files, emit a grouped summary of the intended files and ask the
+    /// user for ONE confirmation before executing anything.
+    ///
+    /// Returns:
+    ///   `None`       — batch has no implementation tools (or already confirmed)
+    ///   `Some(true)` — user approved the implementation
+    ///   `Some(false)`— user declined; no files were written
+    async fn ensure_impl_confirmed(
+        &self,
+        calls: &[ToolCall],
+        tx: &mpsc::Sender<AgentEvent>,
+    ) -> Option<bool> {
+        if !calls.iter().any(|c| Self::is_write_tool(&c.name)) {
+            return None;
+        }
+        if *self.impl_confirmed.lock().unwrap() {
+            return None;
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        for call in calls.iter().filter(|c| Self::is_write_tool(&c.name)) {
+            let path_str = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .ok()
+                .and_then(|v| {
+                    v.get("path")
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "?".to_string());
+            let target = crate::tools::read_file::resolve_path(&self.cwd, &path_str);
+            let op = if target.exists() { "update" } else { "create" };
+            lines.push(format!("  {op:<6} {path_str}"));
+        }
+
+        let mut summary = String::from("The agent wants to create/update these files:\n");
+        summary.push_str(&lines.join("\n"));
+        summary.push('\n');
+
+        let _ = tx.send(AgentEvent::Implementation(summary.clone())).await;
+
+        let approved = match &self.approver {
+            Some(a) => {
+                a.approve("Proceed with the implementation above? [y/n]".to_string())
+                    .await
+                    == Approval::Allow
+            }
+            None => true,
+        };
+        if approved {
+            *self.impl_confirmed.lock().unwrap() = true;
+        }
+        Some(approved)
+    }
+
     pub fn spawn_run(
         &self,
         user_input: String,
     ) -> (mpsc::Receiver<AgentEvent>, tokio::task::JoinHandle<()>) {
         // Reset checkpoint flag — each run gets at most one auto-checkpoint.
         *self.checkpoint_taken.lock().unwrap() = false;
+        // Reset implementation-confirmation gate per run.
+        *self.impl_confirmed.lock().unwrap() = false;
 
         // Use current timestamp as a simple unique run ID for the stash message.
         let run_id = std::time::SystemTime::now()
@@ -398,7 +472,10 @@ impl Agent {
                 let chunk = chunk.context("LLM stream error")?;
                 if let Some(c) = chunk.content {
                     text.push_str(&c);
-                    let _ = tx.send(AgentEvent::Text(c)).await;
+                    // Filter out JSON tool call patterns from being displayed to user
+                    if !should_filter_text_chunk(&c) {
+                        let _ = tx.send(AgentEvent::Text(c)).await;
+                    }
                 }
                 Self::merge_tool_deltas(&mut tool_slots, &chunk.tool_deltas);
                 if let Some(f) = chunk.finish_reason {
@@ -498,6 +575,31 @@ impl Agent {
                     }
                 } else {
                     // Serial execution: approval tools or mixed batch.
+                    // Grouped implementation confirmation — ONE prompt covering
+                    // every write/patch in this batch instead of per-file popups.
+                    if let Some(approved) = self.ensure_impl_confirmed(&clean_calls, &tx).await {
+                        if !approved {
+                            // User declined — report each write as declined so the
+                            // model sees the result and can adapt its approach.
+                            for call in &clean_calls {
+                                if Self::is_write_tool(&call.name) {
+                                    let msg = "Implementation declined by user — no files \
+                                               were written. Ask the user before retrying."
+                                        .to_string();
+                                    self.push(Message::tool_result(call.id.clone(), msg.clone()))
+                                        .await;
+                                    let _ = tx
+                                        .send(AgentEvent::ToolError {
+                                            id: call.id.clone(),
+                                            name: call.name.clone(),
+                                            error: msg,
+                                        })
+                                        .await;
+                                }
+                            }
+                            continue;
+                        }
+                    }
                     for call in &clean_calls {
                         let _ = tx
                             .send(AgentEvent::ToolCall {
@@ -570,6 +672,7 @@ impl Agent {
                 "list_symbols",
                 "write_file",
                 "patch_file",
+                "create_dir",
             ],
             Refactor => &[
                 "read_file",
@@ -579,6 +682,7 @@ impl Agent {
                 "list_symbols",
                 "write_file",
                 "patch_file",
+                "create_dir",
             ],
             ShellExec => &[
                 "read_file",
@@ -587,6 +691,8 @@ impl Agent {
                 "git",
                 "list_symbols",
                 "shell_exec",
+                "run_command",
+                "run_tests",
             ],
             GitOp => &[
                 "read_file",
@@ -603,6 +709,8 @@ impl Agent {
                 "git",
                 "list_symbols",
                 "shell_exec",
+                "run_command",
+                "run_tests",
                 "web_fetch",
             ],
         };
@@ -772,7 +880,9 @@ impl Agent {
                 });
             }
 
-            if let Some(approver) = &self.approver {
+            if let Some(approver) = &self.approver
+                && !*self.impl_confirmed.lock().unwrap()
+            {
                 let patch_str = args
                     .get("patch")
                     .and_then(serde_json::Value::as_str)
@@ -825,7 +935,9 @@ impl Agent {
                 });
             }
 
-            if let Some(approver) = &self.approver {
+            if let Some(approver) = &self.approver
+                && !*self.impl_confirmed.lock().unwrap()
+            {
                 let new_content = args
                     .get("content")
                     .and_then(serde_json::Value::as_str)
@@ -885,6 +997,48 @@ impl Agent {
 
         tool.run(&args, &self.cwd)
     }
+}
+
+/// Filter out JSON tool call patterns from LLM text output.
+/// Some LLMs (e.g., Llama via Ollama) output tool calls as text instead of structured format.
+/// This prevents system execution details from appearing in user-facing chat.
+fn should_filter_text_chunk(text: &str) -> bool {
+    lazy_static::lazy_static! {
+        // Pattern: Match JSON objects that contain both "name" and "parameters" keys
+        // This catches tool calls even with deeply nested content
+        static ref RE_TOOL_CALL: Regex = Regex::new(
+            r#"\{[^}]*"name"\s*:\s*"[^"]*"[^}]*"parameters"\s*:\s*\{.*?\}\s*\}"#
+        ).unwrap();
+    }
+    
+    let trimmed = text.trim();
+    
+    // Filter if:
+    // 1. Contains JSON tool call pattern
+    if RE_TOOL_CALL.is_match(trimmed) {
+        return true;
+    }
+    
+    // 2. Starts with "}; {" - continuation of truncated tool calls
+    if trimmed.starts_with("};") && trimmed.contains(r#"{"name""#) {
+        return true;
+    }
+    
+    // 3. Just artifact tokens (leftover braces from streaming tool-call JSON).
+    //    NOTE: do NOT filter plain whitespace — some models (Llama via Ollama)
+    //    stream spaces as separate chunks; dropping them concatenates words.
+    if trimmed == "};" || trimmed == "}" {
+        return true;
+    }
+    
+    // 4. Looks like start of JSON object with "name" key
+    if (trimmed.starts_with('{') || trimmed.starts_with("}; {")) 
+        && trimmed.contains(r#""name""#) 
+        && trimmed.contains(r#""parameters""#) {
+        return true;
+    }
+    
+    false
 }
 
 #[cfg(test)]
