@@ -331,7 +331,16 @@ impl Agent {
     fn is_readonly_tool(name: &str) -> bool {
         matches!(
             name,
-            "read_file" | "glob" | "grep" | "git" | "web_fetch" | "list_symbols"
+            "read_file"
+                | "read_symbol"
+                | "glob"
+                | "grep"
+                | "search_code"
+                | "git"
+                | "git_diff"
+                | "git_status"
+                | "web_fetch"
+                | "list_symbols"
         )
     }
 
@@ -703,21 +712,31 @@ impl Agent {
     fn tools_for_intent(&self, user_intent: &intent::Intent) -> Vec<crate::tools::ToolDef> {
         use intent::Intent::*;
         // Name sets per intent (from lowest to highest capability).
+        // read_symbol, search_code, git_diff, git_status are read-only tools
+        // available in all non-conversational intents.
         let allowed: &[&str] = match user_intent {
             Conversational => &[],
             Informational => &[
                 "read_file",
+                "read_symbol",
                 "glob",
                 "grep",
+                "search_code",
                 "git",
+                "git_diff",
+                "git_status",
                 "list_symbols",
                 "web_fetch",
             ],
             CodeWrite => &[
                 "read_file",
+                "read_symbol",
                 "glob",
                 "grep",
+                "search_code",
                 "git",
+                "git_diff",
+                "git_status",
                 "list_symbols",
                 "write_file",
                 "patch_file",
@@ -725,9 +744,13 @@ impl Agent {
             ],
             Refactor => &[
                 "read_file",
+                "read_symbol",
                 "glob",
                 "grep",
+                "search_code",
                 "git",
+                "git_diff",
+                "git_status",
                 "list_symbols",
                 "write_file",
                 "patch_file",
@@ -735,9 +758,13 @@ impl Agent {
             ],
             ShellExec => &[
                 "read_file",
+                "read_symbol",
                 "glob",
                 "grep",
+                "search_code",
                 "git",
+                "git_diff",
+                "git_status",
                 "list_symbols",
                 "shell_exec",
                 "run_command",
@@ -748,14 +775,20 @@ impl Agent {
                 "glob",
                 "grep",
                 "git",
+                "git_diff",
+                "git_status",
                 "list_symbols",
                 "shell_exec",
             ],
             Deploy => &[
                 "read_file",
+                "read_symbol",
                 "glob",
                 "grep",
+                "search_code",
                 "git",
+                "git_diff",
+                "git_status",
                 "list_symbols",
                 "shell_exec",
                 "run_command",
@@ -875,18 +908,23 @@ impl Agent {
         // Filesystem reads are sandboxed exactly like writes.  A read is not a
         // "safe" operation — pulling ~/.ssh/id_rsa into the prompt leaks it
         // without ever triggering an approval prompt.
-        if matches!(name.as_str(), "read_file" | "list_symbols" | "create_dir") {
+        if matches!(
+            name.as_str(),
+            "read_file" | "read_symbol" | "list_symbols" | "create_dir" | "git_diff" | "git_status"
+        ) {
             let path_str = args
                 .get("path")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            if let Err(refusal) = self.resolve_in_sandbox(path_str) {
-                return Ok(refusal);
+            if !path_str.is_empty() {
+                if let Err(refusal) = self.resolve_in_sandbox(path_str) {
+                    return Ok(refusal);
+                }
             }
         }
 
-        // `grep` can walk an arbitrary directory via its optional `path` arg.
-        if name == "grep"
+        // `grep` and `search_code` can walk an arbitrary directory via `path`.
+        if matches!(name.as_str(), "grep" | "search_code")
             && let Some(subdir) = args.get("path").and_then(serde_json::Value::as_str)
             && let Err(refusal) = self.resolve_in_sandbox(subdir)
         {

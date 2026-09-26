@@ -1,8 +1,13 @@
 pub mod create_dir;
 pub mod git;
+pub mod git_diff;
+pub mod git_status;
 pub mod patch_file;
 pub mod read_file;
+pub mod read_symbol;
 pub mod search;
+pub mod search_code;
+pub mod security;
 pub mod shell;
 pub mod symbols;
 pub mod web;
@@ -117,6 +122,7 @@ impl ToolDef {
     }
 }
 
+#[derive(Debug)]
 pub struct ToolResult {
     pub content: String,
 }
@@ -129,12 +135,16 @@ pub trait Tool: Sync + Send {
 pub fn all_tools() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(git::GitTool),
+        Box::new(git_diff::GitDiff),
+        Box::new(git_status::GitStatus),
         Box::new(read_file::ReadFile),
+        Box::new(read_symbol::ReadSymbol),
         Box::new(write_file::WriteFile),
         Box::new(patch_file::PatchFile),
         Box::new(symbols::ListSymbols),
         Box::new(search::GlobFiles),
         Box::new(search::GrepFiles),
+        Box::new(search_code::SearchCode),
         Box::new(shell::ShellExec),
         Box::new(shell::RunCommand),
         Box::new(shell::RunTests),

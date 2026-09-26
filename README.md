@@ -309,10 +309,14 @@ There is no session persistence: `/new` clears the in-memory conversation, and c
 | Tool | Description | Approval |
 |------|-------------|----------|
 | `read_file` | Read file with offset/limit | no |
+| `read_symbol` | Extract a named symbol's full source with line numbers | no |
 | `glob` | Find files by pattern | no |
 | `grep` | Search file contents by regex | no |
+| `search_code` | Recursive regex search with optional context lines | no |
 | `list_symbols` | AST symbol index (Rust, Python, JS, TS, Go) | no |
 | `git` | status / diff / log in the project | no |
+| `git_diff` | Unstaged and staged diffs, with path scoping | no |
+| `git_status` | Branch, short status, and untracked-file count | no |
 | `web_fetch` | Fetch and extract content from a URL | no |
 | `write_file` | Create or overwrite a file | yes |
 | `patch_file` | Apply a unified diff hunk | yes |
