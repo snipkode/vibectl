@@ -10,6 +10,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 
 pub struct AnthropicProvider {
     api_key: String,
@@ -117,14 +118,15 @@ impl Provider for AnthropicProvider {
         let mut body = Self::build_body(req);
         body["stream"] = json!(false);
 
-        let resp = self
-            .http
-            .post("https://api.anthropic.com/v1/messages")
-            .headers(self.headers()?)
-            .json(&body)
-            .send()
-            .await
-            .context("anthropic request failed")?;
+        let headers = self.headers()?;
+        let resp = crate::llm::provider::send_with_retry(|| {
+            self.http
+                .post(ANTHROPIC_URL)
+                .headers(headers.clone())
+                .json(&body)
+        })
+        .await
+        .context("anthropic request failed")?;
 
         let status = resp.status();
         let text = resp
@@ -200,14 +202,15 @@ impl Provider for AnthropicProvider {
         let mut body = Self::build_body(req);
         body["stream"] = json!(true);
 
-        let resp = self
-            .http
-            .post("https://api.anthropic.com/v1/messages")
-            .headers(self.headers()?)
-            .json(&body)
-            .send()
-            .await
-            .context("anthropic stream request failed")?;
+        let headers = self.headers()?;
+        let resp = crate::llm::provider::send_with_retry(|| {
+            self.http
+                .post(ANTHROPIC_URL)
+                .headers(headers.clone())
+                .json(&body)
+        })
+        .await
+        .context("anthropic stream request failed")?;
 
         let status = resp.status();
         if !status.is_success() {
