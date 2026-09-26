@@ -657,6 +657,7 @@ impl Agent {
             // and here we clear any text that the model emitted purely as a tool call.
             if clean_calls.is_empty() && !text.trim().is_empty() {
                 let parsed = extract_tool_calls_from_text(&text, run_id);
+                let parsed_is_empty = parsed.is_empty();
                 let (valid, invalid): (Vec<_>, Vec<_>) =
                     parsed.into_iter().partition(|c| known_names.contains(&c.name));
 
@@ -705,6 +706,37 @@ impl Agent {
                     // stored in history as a plain assistant reply.
                     text = String::new();
                     clean_calls = valid;
+                } else if parsed_is_empty && looks_like_tool_call_json(&text) {
+                    // Text looks like a tool call JSON but couldn't be parsed
+                    // (e.g. uses template placeholders like <resource-id> that
+                    // make it invalid JSON).  Treat it as a hallucinated tool call:
+                    // suppress from UI, send correction, and retry.
+                    let available: Vec<String> = {
+                        let mut v: Vec<String> = known_names.iter().cloned().collect();
+                        v.sort();
+                        v
+                    };
+                    let feedback = format!(
+                        "SYSTEM CORRECTION: You output invalid JSON or a non-existent tool call.\n\
+                         You MUST use ONLY these exact tool names:\n  {}\n\n\
+                         DO NOT use template placeholders like <value>. Use real values.\n\
+                         DO NOT apologize. IMMEDIATELY call the correct tool.",
+                        available.join(", ")
+                    );
+                    self.push(Message::assistant(text.clone())).await;
+                    self.push(Message::system(feedback)).await;
+                    hallucination_retries += 1;
+                    if hallucination_retries >= MAX_HALLUCINATION_RETRIES {
+                        let _ = tx
+                            .send(AgentEvent::Text(
+                                "Agent produced invalid tool calls repeatedly. Stopping.\n"
+                                    .to_string(),
+                            ))
+                            .await;
+                        let _ = tx.send(AgentEvent::Done { finish_reason }).await;
+                        return Ok(());
+                    }
+                    continue;
                 }
             }
 
@@ -1439,6 +1471,24 @@ impl Agent {
 ///   ```json\n{"name": "write_file", ...}\n```
 ///
 /// Returns an empty Vec when nothing parseable is found.
+/// Returns true when text looks like it was intended to be a tool call JSON
+/// but couldn't be parsed — e.g. contains `"name"` and `"arguments"` keys
+/// (or `"parameters"`) with a leading `{`, including cases where the JSON
+/// is invalid due to template placeholders like `<resource-id>`.
+fn looks_like_tool_call_json(text: &str) -> bool {
+    let t = text.trim();
+    if !t.starts_with('{') && !t.starts_with('[') {
+        return false;
+    }
+    // Must contain a "name" key with a string value pattern.
+    let has_name = t.contains(r#""name""#) || t.contains(r#"'name'"#);
+    let has_args = t.contains(r#""arguments""#)
+        || t.contains(r#""parameters""#)
+        || t.contains(r#"'arguments'"#)
+        || t.contains(r#"'parameters'"#);
+    has_name && has_args
+}
+
 fn extract_tool_calls_from_text(text: &str, run_id: u64) -> Vec<ToolCall> {
     let mut results: Vec<ToolCall> = Vec::new();
 
