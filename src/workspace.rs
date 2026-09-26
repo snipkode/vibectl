@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -256,7 +256,9 @@ impl WorkspaceContext {
                 // If file doesn't exist yet, validate parent directory
                 if let Some(parent) = target.parent() {
                     if parent.exists() {
-                        parent.canonicalize().map(|p| p.join(target.file_name().unwrap()))
+                        parent
+                            .canonicalize()
+                            .map(|p| p.join(target.file_name().unwrap()))
                     } else {
                         Ok(target.clone())
                     }
@@ -299,7 +301,10 @@ impl WorkspaceContext {
         let mut lines = vec![
             format!("Workspace: {}", self.root.display()),
             format!("Project Type: {:?}", self.project_type),
-            format!("Status: {}", if self.is_existing { "Existing" } else { "New" }),
+            format!(
+                "Status: {}",
+                if self.is_existing { "Existing" } else { "New" }
+            ),
         ];
 
         if !self.manifest_files.is_empty() {

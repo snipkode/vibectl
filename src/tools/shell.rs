@@ -73,7 +73,7 @@ impl Tool for RunCommand {
             .as_str()
             .context("'command' must be a string")?
             .to_string();
-        
+
         let timeout_secs = args
             .get("timeout_seconds")
             .and_then(|v| v.as_u64())
@@ -149,7 +149,7 @@ fn detect_test_command(cwd: &Path) -> Result<String> {
     if cwd.join("requirements.txt").exists() || cwd.join("pyproject.toml").exists() {
         return Ok("pytest".to_string());
     }
-    
+
     bail!("Could not detect project type. Please specify test_command explicitly.")
 }
 
@@ -197,11 +197,14 @@ async fn run_async(command: &str, cwd: &Path, timeout_secs: u64) -> Result<ToolR
     // Build structured output
     let mut result_text = String::new();
     result_text.push_str(&format!("$ {}\n\n", command));
-    
+
     result_text.push_str("=== EXECUTION RESULT ===\n");
     result_text.push_str(&format!("Exit Code: {}\n", exit_code));
     result_text.push_str(&format!("Duration: {:.2}s\n", duration.as_secs_f64()));
-    result_text.push_str(&format!("Status: {}\n\n", if exit_code == 0 { "SUCCESS" } else { "FAILED" }));
+    result_text.push_str(&format!(
+        "Status: {}\n\n",
+        if exit_code == 0 { "SUCCESS" } else { "FAILED" }
+    ));
 
     if !stdout.trim().is_empty() {
         result_text.push_str("=== STDOUT ===\n");
@@ -218,11 +221,13 @@ async fn run_async(command: &str, cwd: &Path, timeout_secs: u64) -> Result<ToolR
     // Add interpretation hint for the agent
     if exit_code != 0 {
         result_text.push_str("=== ANALYSIS ===\n");
-        result_text.push_str("Command failed. Review the error output above to identify the issue.\n");
+        result_text
+            .push_str("Command failed. Review the error output above to identify the issue.\n");
         result_text.push_str("Common causes:\n");
         result_text.push_str("- Missing dependencies (run installation command first)\n");
         result_text.push_str("- Syntax errors in code (check stderr for file and line numbers)\n");
-        result_text.push_str("- Configuration issues (check environment variables and config files)\n");
+        result_text
+            .push_str("- Configuration issues (check environment variables and config files)\n");
         result_text.push_str("- Test failures (review test output for specific failing tests)\n");
     }
 

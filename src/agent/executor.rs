@@ -103,7 +103,7 @@ impl ExecutionLoop {
         use std::process::Stdio;
         use std::time::Instant;
         use tokio::process::Command;
-        use tokio::time::{timeout, Duration};
+        use tokio::time::{Duration, timeout};
 
         let start = Instant::now();
         let deadline = Duration::from_secs(step.timeout_secs);
@@ -260,8 +260,7 @@ impl ExecutionLoop {
             if result.command.contains("npm") || result.command.contains("node") {
                 suggestions.push("Run 'npm install' to install missing dependencies".to_string());
             } else if result.command.contains("cargo") {
-                suggestions
-                    .push("Run 'cargo build' to fetch and compile dependencies".to_string());
+                suggestions.push("Run 'cargo build' to fetch and compile dependencies".to_string());
             } else if result.command.contains("go") {
                 suggestions.push("Run 'go mod download' to fetch dependencies".to_string());
             } else if result.command.contains("python") || result.command.contains("pytest") {
@@ -302,14 +301,14 @@ impl ExecutionLoop {
 
         // Environment issues
         if lower.contains("permission denied") {
-            suggestions.push("Check file permissions or run with appropriate privileges".to_string());
+            suggestions
+                .push("Check file permissions or run with appropriate privileges".to_string());
         }
 
         // Generic fallback
         if suggestions.is_empty() {
-            suggestions.push(
-                "Review the error output above and fix the identified issues".to_string(),
-            );
+            suggestions
+                .push("Review the error output above and fix the identified issues".to_string());
         }
 
         suggestions
@@ -317,7 +316,10 @@ impl ExecutionLoop {
 
     /// Build a concise error summary for the LLM
     fn build_error_summary(result: &ValidationResult, _error_text: &str) -> String {
-        let mut summary = format!("Command '{}' failed with exit code {}.\n\n", result.command, result.exit_code);
+        let mut summary = format!(
+            "Command '{}' failed with exit code {}.\n\n",
+            result.command, result.exit_code
+        );
 
         // Extract the most relevant error lines (last 30 lines of stderr + key error messages)
         let stderr_lines: Vec<&str> = result.stderr.lines().collect();
@@ -378,7 +380,7 @@ impl AnalysisReport {
             }
         }
 
-        output.push_str("\n");
+        output.push('\n');
         output.push_str("IMPORTANT: You must analyze this error and take corrective action.\n");
         output.push_str("Do NOT retry the same command without making changes to fix the issue.\n");
 
