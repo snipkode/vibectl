@@ -380,6 +380,7 @@ impl Agent {
         }
 
         let mut lines: Vec<String> = Vec::new();
+        let mut has_suspicious_update = false;
         for call in calls.iter().filter(|c| Self::is_write_tool(&c.name)) {
             let path_str = serde_json::from_str::<serde_json::Value>(&call.arguments)
                 .ok()
@@ -391,11 +392,24 @@ impl Agent {
                 .unwrap_or_else(|| "?".to_string());
             let target = crate::tools::read_file::resolve_path(&self.cwd, &path_str);
             let op = if target.exists() { "update" } else { "create" };
+            // Warn if the model wants to update an existing directory directly
+            // (e.g. trying to write into `src/` of the current project instead
+            // of creating a named subdirectory for the new project).
+            if op == "update" && target.is_dir() {
+                has_suspicious_update = true;
+            }
             lines.push(format!("  {op:<6} {path_str}"));
         }
 
         let mut summary = String::from("The agent wants to create/update these files:\n");
         summary.push_str(&lines.join("\n"));
+        if has_suspicious_update {
+            summary.push_str(
+                "\n\n⚠ WARNING: Agent is trying to write into an existing directory.\n\
+                 If you asked for a NEW project, decline [n] and re-ask with a project name,\n\
+                 e.g. \"buatkan project rest-api di folder rest-api\"",
+            );
+        }
         summary.push('\n');
 
         let _ = tx.send(AgentEvent::Implementation(summary.clone())).await;
@@ -597,22 +611,21 @@ impl Agent {
                     v
                 };
                 let feedback = format!(
-                    "ERROR: Unknown tool(s): {}.\n\
-                     Available tools: {}.\n\
-                     Use ONLY the listed tool names. Do not invent new tool names.",
+                    "SYSTEM CORRECTION: Tool(s) not found: {}.\n\
+                     These tool names do not exist. You MUST use ONLY these exact names:\n  {}\n\n\
+                     DO NOT apologize. DO NOT explain. DO NOT respond with text.\n\
+                     IMMEDIATELY retry the task using the correct tool names above.",
                     names.join(", "),
                     available.join(", ")
                 );
-                // Push feedback to LLM history only — do NOT send to UI.
-                // This is an internal correction loop; the user should only
-                // see the final result, not the internal error/retry cycle.
+                // Use system role so the model treats this as a runtime correction,
+                // not a user message — prevents the "I apologize..." conversational response.
                 self.push(Message::assistant_tool_calls_with_text(
                     structured_invalid.clone(),
-                    text.clone(),
+                    String::new(),
                 ))
                 .await;
-                self.push(Message::user(feedback)).await;
-                // Loop back — give the LLM a chance to use a valid tool name.
+                self.push(Message::system(feedback)).await;
                 hallucination_retries += 1;
                 if hallucination_retries >= MAX_HALLUCINATION_RETRIES {
                     let _ = tx
@@ -649,15 +662,17 @@ impl Agent {
                         v
                     };
                     let feedback = format!(
-                        "ERROR: Unknown tool(s): {}.\n\
-                         Available tools: {}.\n\
-                         Use ONLY the listed tool names. Do not invent new tool names.",
+                        "SYSTEM CORRECTION: Tool(s) not found: {}.\n\
+                         These tool names do not exist. You MUST use ONLY these exact names:\n  {}\n\n\
+                         DO NOT apologize. DO NOT explain. DO NOT respond with text.\n\
+                         IMMEDIATELY retry the task using the correct tool names above.",
                         names.join(", "),
                         available.join(", ")
                     );
-                    // Push feedback to LLM history only — do NOT send to UI.
+                    // Use system role so the model treats this as a runtime correction,
+                    // not a user message — prevents "I apologize..." conversational response.
                     self.push(Message::assistant(text.clone())).await;
-                    self.push(Message::user(feedback)).await;
+                    self.push(Message::system(feedback)).await;
 
                     if valid.is_empty() {
                         // All parsed calls were hallucinated — loop back so the
@@ -1223,6 +1238,48 @@ impl Agent {
                 if let Approval::Deny = approver.approve(desc).await {
                     return Ok(crate::tools::ToolResult {
                         content: format!("Write rejected by user approval: {}", target.display()),
+                    });
+                }
+            }
+
+            // Checkpoint before first write in this run.
+            self.maybe_checkpoint(run_id, tx).await;
+            return tool.run(&args, &self.cwd);
+        }
+
+        if name == "create_dir" {
+            let path_str = args
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let target = crate::tools::read_file::resolve_path(&self.cwd, &path_str);
+            let root = self.sandbox_root();
+            let outside = !crate::tools::is_within(&root, &target);
+
+            if outside && !self.allow_any_path {
+                return Ok(crate::tools::ToolResult {
+                    content: format!(
+                        "SAFEGUARD: refusing to create directory {} — outside the project root {}.",
+                        target.display(),
+                        root.display()
+                    ),
+                });
+            }
+
+            if let Some(approver) = &self.approver
+                && !*self.impl_confirmed.lock().unwrap()
+            {
+                let mut desc = format!("create_dir: {}", target.display());
+                if outside {
+                    desc = format!("OUTSIDE PROJECT: {desc}");
+                }
+                if let Approval::Deny = approver.approve(desc).await {
+                    return Ok(crate::tools::ToolResult {
+                        content: format!(
+                            "create_dir rejected by user approval: {}",
+                            target.display()
+                        ),
                     });
                 }
             }

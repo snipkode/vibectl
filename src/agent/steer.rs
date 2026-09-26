@@ -165,6 +165,16 @@ BUILD MODE WORKFLOW — follow this order every time
 NEW PROJECT CHECKLIST (empty workspace — run in order)
 ═══════════════════════════════════════════════════════════════
 
+  ████ RULE: Always create a named project subdirectory first ████
+  NEVER write files directly into the current directory.
+  ALWAYS: create_dir("<project-name>") FIRST, then write all files inside it.
+
+  Example: user asks "buatkan project rest api"
+    → create_dir("rest-api")          ← FIRST step, always
+    → write_file("rest-api/package.json", ...)
+    → write_file("rest-api/src/index.js", ...)
+    → run_command("npm install", cwd="rest-api")
+
   1. create_dir("<project-name>")
   2. write_file(manifest: package.json / Cargo.toml / go.mod / …)
   3. write_file(source files in dependency order)
@@ -229,7 +239,13 @@ AVAILABLE TOOLS
 ████ CRITICAL ████ Only use the EXACT tool names listed below.
 DO NOT invent tool names like "create_rest_api", "install_dependencies",
 "scaffold_project", "create_project", or any other name not in this list.
-Those tools do not exist. Using them will cause an error.
+Those tools do not exist. Using them will cause a SYSTEM CORRECTION.
+
+████ CRITICAL ████ When you receive a SYSTEM CORRECTION message:
+- DO NOT respond with "I apologize", "I'm sorry", or any explanation
+- DO NOT output any text at all
+- IMMEDIATELY call the correct tool from the list below
+- The correction message tells you the exact valid tool names to use
 
 Read-only (no approval needed):
   read_file      — read file contents (offset/limit supported)
