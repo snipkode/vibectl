@@ -696,6 +696,12 @@ impl Agent {
 
             let mut clean_calls: Vec<ToolCall> = structured_valid;
 
+            // ── Alias expansion ───────────────────────────────────────────────
+            // Some models persistently use hallucinated tool names like
+            // "create_project", "scaffold_project", "create_new_resource".
+            // Instead of rejecting them, expand them into real tool sequences.
+            clean_calls = expand_tool_aliases(clean_calls, run_id);
+
             // ── Fallback: parse JSON tool calls from plain text ────────────────
             // Some models (qwen2.5-coder:1.5b, llama3.2, etc.) output tool calls
             // as JSON text instead of structured tool_calls. Parse and execute them.
@@ -753,7 +759,7 @@ impl Agent {
                     // The text was a tool call JSON — clear it so it is not
                     // stored in history as a plain assistant reply.
                     text = String::new();
-                    clean_calls = valid;
+                    clean_calls = expand_tool_aliases(valid, run_id);
                 } else if parsed_is_empty && looks_like_tool_call_json(&text) {
                     // Text looks like a tool call JSON but couldn't be parsed
                     // (e.g. uses template placeholders like <resource-id> that
@@ -1523,6 +1529,101 @@ impl Agent {
 /// but couldn't be parsed — e.g. contains `"name"` and `"arguments"` keys
 /// (or `"parameters"`) with a leading `{`, including cases where the JSON
 /// is invalid due to template placeholders like `<resource-id>`.
+
+/// Expand hallucinated alias tool names into real tool call sequences.
+///
+/// Models like qwen2.5-coder:1.5b persistently invent tool names such as
+/// `create_project`, `scaffold_project`, `create_new_resource` that do not
+/// exist in the registry.  Rather than rejecting and retrying forever, we
+/// intercept these aliases and expand them into the equivalent real tool calls.
+fn expand_tool_aliases(calls: Vec<ToolCall>, run_id: u64) -> Vec<ToolCall> {
+    let mut out: Vec<ToolCall> = Vec::new();
+    for call in calls {
+        match call.name.as_str() {
+            "create_project"
+            | "scaffold_project"
+            | "init_project"
+            | "new_project"
+            | "create_app"
+            | "init_app" => {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+                let dir_name = args
+                    .get("name")
+                    .or_else(|| args.get("project_name"))
+                    .or_else(|| args.get("directory"))
+                    .or_else(|| args.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("project")
+                    .to_string();
+                let dir_name: String = dir_name
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                    .collect::<String>()
+                    .trim_matches('-')
+                    .to_string();
+                let dir_name = if dir_name.is_empty() { "project".to_string() } else { dir_name };
+                out.push(ToolCall {
+                    id: format!("alias_{run_id}_{}", out.len()),
+                    name: "create_dir".to_string(),
+                    arguments: serde_json::json!({"path": dir_name}).to_string(),
+                });
+            }
+            "edit_existing_resource"
+            | "update_resource"
+            | "update_file"
+            | "edit_file"
+            | "modify_file"
+            | "create_new_resource"
+            | "add_resource" => {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+                let path = args
+                    .get("path")
+                    .or_else(|| args.get("file"))
+                    .or_else(|| args.get("resource"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(".")
+                    .to_string();
+                out.push(ToolCall {
+                    id: format!("alias_{run_id}_{}", out.len()),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": path}).to_string(),
+                });
+            }
+            "install_dependencies"
+            | "npm_install"
+            | "install_packages"
+            | "setup_dependencies" => {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+                let cwd_arg = args
+                    .get("cwd")
+                    .or_else(|| args.get("directory"))
+                    .or_else(|| args.get("path"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| format!(r#","cwd":"{}""#, s))
+                    .unwrap_or_default();
+                out.push(ToolCall {
+                    id: format!("alias_{run_id}_{}", out.len()),
+                    name: "run_command".to_string(),
+                    arguments: format!(r#"{{"command":"npm install"{cwd_arg}}}"#),
+                });
+            }
+            "run_server" | "start_server" | "run_app" => {
+                out.push(ToolCall {
+                    id: format!("alias_{run_id}_{}", out.len()),
+                    name: "run_command".to_string(),
+                    arguments: r#"{"command":"node --check src/index.js"}"#.to_string(),
+                });
+            }
+            _ => out.push(call),
+        }
+    }
+    out
+}
+
 fn looks_like_tool_call_json(text: &str) -> bool {
     let t = text.trim();
     if !t.starts_with('{') && !t.starts_with('[') {
