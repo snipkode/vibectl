@@ -539,6 +539,21 @@ impl Agent {
 
         loop {
             let messages = self.snapshot().await;
+
+            // Build a compact tool-name reminder to inject as system context.
+            // Repeated every iteration so small models don't "forget" the valid
+            // names after several rounds of tool-result messages in history.
+            let tool_names: Vec<String> = {
+                let mut v: Vec<String> = intent_tools.iter().map(|t| t.name.clone()).collect();
+                v.sort();
+                v
+            };
+            let tool_reminder = format!(
+                "REMINDER — valid tool names for this task: {}. \
+                 Use ONLY these names. Any other name will be rejected.",
+                tool_names.join(", ")
+            );
+
             let req = ChatRequest {
                 model: self.model.clone(),
                 messages,
@@ -546,7 +561,7 @@ impl Agent {
                 max_tokens: self.max_tokens,
                 stream: true,
                 tools: intent_tools.clone(),
-                system: Some(self.system.clone()),
+                system: Some(format!("{}\n\n{}", self.system, tool_reminder)),
             };
 
             let stream = self

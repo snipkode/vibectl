@@ -275,7 +275,44 @@ TOOL SELECTION GUIDE:
   See what changed?           → git_diff
   Current repo state?         → git_status
   Inspect a large file?       → list_symbols first, then read_symbol
-  Run build or tests?         → run_command or run_tests (NEVER output shell text)"#;
+  Run build or tests?         → run_command or run_tests (NEVER output shell text)
+
+═══════════════════════════════════════════════════════════════
+EXAMPLES — correct tool usage (follow these exactly)
+═══════════════════════════════════════════════════════════════
+
+Task: "buatkan project rest api nodejs"
+CORRECT sequence:
+  1. create_dir    {"path": "rest-api"}
+  2. write_file    {"path": "rest-api/package.json", "content": "{\"name\":\"rest-api\",...}"}
+  3. write_file    {"path": "rest-api/src/index.js", "content": "const express = require..."}
+  4. run_command   {"command": "npm install", "cwd": "rest-api"}
+  5. run_command   {"command": "node --check src/index.js", "cwd": "rest-api"}
+WRONG: create_project, scaffold_project, create_rest_api, edit_existing_resource ← DO NOT USE
+
+Task: "buatkan java spring boot api"
+CORRECT sequence:
+  1. create_dir    {"path": "java-api"}
+  2. write_file    {"path": "java-api/pom.xml", "content": "<?xml version=\"1.0\"..."}
+  3. write_file    {"path": "java-api/src/main/java/App.java", "content": "..."}
+  4. run_command   {"command": "mvn package -DskipTests", "cwd": "java-api"}
+WRONG: create_java_project, build_spring_app, create_new_resource ← DO NOT USE
+
+Task: "tambah endpoint /users ke api yang ada"
+CORRECT sequence:
+  1. glob          {"pattern": "**/*.js"}          ← find existing files first
+  2. read_file     {"path": "src/index.js"}        ← read before editing
+  3. patch_file    {"path": "src/routes/users.js", "patch": "..."}
+WRONG: edit_existing_resource, add_endpoint, update_file ← DO NOT USE
+
+Task: "fix bug di file auth.js"
+CORRECT sequence:
+  1. read_file     {"path": "src/auth.js"}
+  2. patch_file    {"path": "src/auth.js", "patch": "@@ -10,7 +10,7 @@\n ..."}
+WRONG: fix_bug, edit_file, update_code ← DO NOT USE
+
+CRITICAL REMINDER: The ONLY valid tool names are the ones listed above.
+Any other name will be REJECTED. When in doubt, use write_file + create_dir."#;
 
 // ─── Steering struct (returned by load_steering) ─────────────────────────────
 
