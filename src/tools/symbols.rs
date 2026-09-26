@@ -63,25 +63,20 @@ The `kind` filter is optional — omit it to list all symbols."#,
             .with_context(|| format!("failed to read {}", target.display()))?;
 
         let symbols = match ext.as_str() {
-            "rs" => extract_symbols(
-                &source,
-                rust_language(),
-                &RUST_RULES,
-                kind_filter.as_deref(),
-            ),
+            "rs" => extract_symbols(&source, rust_language(), RUST_RULES, kind_filter.as_deref()),
             "py" => extract_symbols(
                 &source,
                 python_language(),
-                &PYTHON_RULES,
+                PYTHON_RULES,
                 kind_filter.as_deref(),
             ),
             "js" | "jsx" | "mjs" | "cjs" => {
-                extract_symbols(&source, js_language(), &JS_RULES, kind_filter.as_deref())
+                extract_symbols(&source, js_language(), JS_RULES, kind_filter.as_deref())
             }
             "ts" | "tsx" => {
-                extract_symbols(&source, ts_language(), &TS_RULES, kind_filter.as_deref())
+                extract_symbols(&source, ts_language(), TS_RULES, kind_filter.as_deref())
             }
-            "go" => extract_symbols(&source, go_language(), &GO_RULES, kind_filter.as_deref()),
+            "go" => extract_symbols(&source, go_language(), GO_RULES, kind_filter.as_deref()),
             other => {
                 bail!(
                     "list_symbols: unsupported file extension '.{other}'. \
@@ -425,26 +420,25 @@ fn walk_tree(
 /// Falls back to the node text itself or "(anonymous)" if nothing found.
 fn extract_name(node: &Node<'_>, source: &[u8], rule: &Rule) -> String {
     // Try named child by field name.
-    if let Some(name_node) = node.child_by_field_name(rule.name_field) {
-        if let Ok(text) = name_node.utf8_text(source) {
-            // For impl blocks the "type" field may be a complex path — truncate at '<'.
-            let clean = text.split('<').next().unwrap_or(text).trim();
-            return clean.to_string();
-        }
+    if let Some(name_node) = node.child_by_field_name(rule.name_field)
+        && let Ok(text) = name_node.utf8_text(source)
+    {
+        // For impl blocks the "type" field may be a complex path — truncate at '<'.
+        let clean = text.split('<').next().unwrap_or(text).trim();
+        return clean.to_string();
     }
 
     // Fallback: first named child that looks like an identifier.
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         let kind = child.kind();
-        if kind == "identifier"
+        if (kind == "identifier"
             || kind == "type_identifier"
             || kind == "field_identifier"
-            || kind == "property_identifier"
+            || kind == "property_identifier")
+            && let Ok(text) = child.utf8_text(source)
         {
-            if let Ok(text) = child.utf8_text(source) {
-                return text.to_string();
-            }
+            return text.to_string();
         }
     }
 
