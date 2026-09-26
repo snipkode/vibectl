@@ -280,20 +280,23 @@ impl WorkspaceContext {
         Ok(canonical)
     }
 
-    /// Check if a path is safe to delete (prevent accidental deletion of important files)
-    pub fn is_safe_to_delete(&self, path: &Path) -> bool {
-        let dangerous_patterns = [
-            ".git",
-            "node_modules",
-            "target",
-            ".env",
-            "package.json",
-            "Cargo.toml",
-            "go.mod",
-        ];
+    /// Files whose deletion would break the project or leak secrets, on top of
+    /// the shared set of directories that are never worth touching.
+    const IRREPLACEABLE_FILES: &'static [&'static str] =
+        &[".env", "package.json", "Cargo.toml", "go.mod"];
 
+    /// Check if a path is safe to delete (prevent accidental deletion of important files)
+    ///
+    /// Takes no `self`: the answer depends only on the path, and taking `self`
+    /// invited callers to build a whole `WorkspaceContext` to ask.
+    pub fn is_safe_to_delete(path: &Path) -> bool {
         let path_str = path.to_string_lossy();
-        !dangerous_patterns.iter().any(|p| path_str.contains(p))
+        // SKIP_DIRS already lists .git, node_modules, and target; re-listing
+        // them here was a second place to forget one.
+        !crate::langs::SKIP_DIRS
+            .iter()
+            .chain(Self::IRREPLACEABLE_FILES.iter())
+            .any(|p| path_str.contains(p))
     }
 
     /// Get a summary of the workspace for display/logging
@@ -427,5 +430,137 @@ mod tests {
         assert_eq!(ProjectType::Rust.package_manager(), "cargo");
         assert_eq!(ProjectType::Go.package_manager(), "go");
         assert_eq!(ProjectType::Python.package_manager(), "pip");
+    }
+
+    /// Files that identify a project, other than lockfiles.
+    ///
+    /// Lockfiles are deliberately absent: they reinforce a type but never
+    /// define one, and a repo can carry several (`package-lock.json`,
+    /// `yarn.lock`) for the same manifest.
+    const IDENTIFYING_MANIFESTS: &[(&str, ProjectType)] = &[
+        ("package.json", ProjectType::NodeJs),
+        ("Cargo.toml", ProjectType::Rust),
+        ("go.mod", ProjectType::Go),
+        ("requirements.txt", ProjectType::Python),
+        ("setup.py", ProjectType::Python),
+        ("pyproject.toml", ProjectType::Python),
+        ("Pipfile", ProjectType::Python),
+    ];
+
+    /// Every manifest `detect_project_type` recognises must be declared by the
+    /// shared language registry, under a language that maps to the same type.
+    ///
+    /// Two tables now know which file means which project type, so a manifest
+    /// added to one and not the other would make `WorkspaceContext` and
+    /// `langs::LANGS` disagree. This test is the tie between them.
+    #[test]
+    fn project_detection_manifests_are_declared_in_the_registry() {
+        for (manifest, ptype) in IDENTIFYING_MANIFESTS {
+            let lang_name = match ptype {
+                ProjectType::NodeJs => "JavaScript",
+                ProjectType::Rust => "Rust",
+                ProjectType::Go => "Go",
+                ProjectType::Python => "Python",
+                ProjectType::Unknown => continue,
+            };
+            let lang = crate::langs::LANGS
+                .iter()
+                .find(|l| l.name == lang_name)
+                .unwrap_or_else(|| panic!("{lang_name} missing from the registry"));
+            assert!(
+                lang.manifests.contains(manifest),
+                "{lang_name} does not declare {manifest}, but detect_project_type does"
+            );
+        }
+    }
+
+    /// The reverse direction: a registry manifest for a language that has a
+    /// ProjectType should actually be detected. Catches a manifest added to the
+    /// registry that detection ignores.
+    #[test]
+    fn registry_manifests_for_known_types_are_actually_detected() {
+        for lang in crate::langs::LANGS {
+            let expected = match lang.name {
+                "JavaScript" => Some(ProjectType::NodeJs),
+                "Rust" => Some(ProjectType::Rust),
+                "Go" => Some(ProjectType::Go),
+                "Python" => Some(ProjectType::Python),
+                _ => None,
+            };
+            let Some(expected) = expected else { continue };
+
+            for manifest in lang.manifests {
+                // Glob-style manifests (`*.csproj`) have no detector yet, so
+                // only assert for the concrete filenames.
+                if manifest.contains('*') {
+                    continue;
+                }
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(dir.path().join(manifest), "").unwrap();
+                let detected = WorkspaceContext::detect_project_type(dir.path()).unwrap();
+                assert_eq!(
+                    detected, expected,
+                    "a bare {manifest} should detect as {expected:?}"
+                );
+            }
+        }
+    }
+
+    /// A directory with nothing recognisable must stay Unknown rather than
+    /// defaulting to a guess.
+    #[test]
+    fn an_empty_directory_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            WorkspaceContext::detect_project_type(dir.path()).unwrap(),
+            ProjectType::Unknown
+        );
+    }
+}
+
+#[cfg(test)]
+mod delete_safety_tests {
+    use super::*;
+
+    fn deletable(path: &str) -> bool {
+        WorkspaceContext::is_safe_to_delete(Path::new(path))
+    }
+
+    /// `is_safe_to_delete` shares its directory list with SKIP_DIRS, so a
+    /// directory added to the registry is automatically protected here.
+    #[test]
+    fn every_skipped_directory_is_also_undeletable() {
+        for dir in crate::langs::SKIP_DIRS {
+            let path = format!("some/project/{dir}");
+            assert!(
+                !deletable(&path),
+                "{dir} is walked past elsewhere but is not protected from deletion"
+            );
+        }
+    }
+
+    #[test]
+    fn irreplaceable_files_are_protected() {
+        for f in WorkspaceContext::IRREPLACEABLE_FILES {
+            assert!(
+                !deletable(&format!("project/{f}")),
+                "{f} should be protected"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_source_file_is_deletable() {
+        for path in ["src/main.rs", "lib/api.ts", "README.md", "app/models.py"] {
+            assert!(deletable(path), "{path} should be deletable");
+        }
+    }
+
+    /// The protection is a substring match, so a path that merely *contains* a
+    /// dangerous name is refused. That is the conservative direction, and worth
+    /// pinning so a future "smartening" of this check is a deliberate change.
+    #[test]
+    fn a_path_containing_a_protected_name_is_refused_conservatively() {
+        assert!(!deletable("packages/old-Cargo.toml.bak/x.rs"));
     }
 }

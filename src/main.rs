@@ -3,6 +3,7 @@ mod audit;
 mod cli;
 mod config;
 mod headless;
+mod langs;
 mod llm;
 mod session;
 mod tools;

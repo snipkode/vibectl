@@ -308,31 +308,30 @@ pub fn discover(cwd: &Path) -> DiscoveryReport {
     report.project_root = root.clone();
 
     // ── Detect languages from manifests ──────────────────────────────────────
-    let manifest_candidates: &[(&str, &str)] = &[
-        ("Cargo.toml", "Rust"),
-        ("package.json", "Node.js / JavaScript"),
-        ("go.mod", "Go"),
-        ("pyproject.toml", "Python"),
-        ("pom.xml", "Java (Maven)"),
-        ("build.gradle", "Java / Kotlin (Gradle)"),
-        ("Gemfile", "Ruby"),
-        ("mix.exs", "Elixir"),
-        ("pubspec.yaml", "Dart / Flutter"),
-    ];
-
+    //
+    // Derived from the shared registry rather than a local list, so a manifest
+    // added there is discovered here. Names come from `Lang::name` too, which
+    // is why audit output now says "JavaScript" rather than the old ad-hoc
+    // "Node.js / JavaScript".
     let search_root = root.as_deref().unwrap_or(cwd);
-    for (file, lang) in manifest_candidates {
-        let p = search_root.join(file);
-        if p.is_file() {
-            report.languages.push(lang.to_string());
-            report.manifests.push(DiscoveryEntry::found(
-                p.display().to_string(),
-                format!("language: {lang}"),
-            ));
-        } else {
-            report
-                .manifests
-                .push(DiscoveryEntry::not_found(file.to_string()));
+    for lang in crate::langs::LANGS {
+        if lang.manifests.is_empty() {
+            continue;
+        }
+        for manifest in lang.manifests {
+            if let Some(path) = find_manifest(search_root, manifest) {
+                if !report.languages.iter().any(|l| l == lang.name) {
+                    report.languages.push(lang.name.to_string());
+                }
+                report.manifests.push(DiscoveryEntry::found(
+                    path.display().to_string(),
+                    format!("language: {}", lang.name),
+                ));
+            } else {
+                report
+                    .manifests
+                    .push(DiscoveryEntry::not_found((*manifest).to_string()));
+            }
         }
     }
 
@@ -537,24 +536,36 @@ pub fn discover(cwd: &Path) -> DiscoveryReport {
 
 /// Build a concise project file tree for injection into the system prompt.
 /// Lists source files under common source directories, capped at `max_entries`.
+/// Resolve a manifest name against the project root, supporting the `*.ext`
+/// glob form (e.g. `*.csproj`) that the registry uses for projects whose
+/// filenames are not fixed.
+fn find_manifest(root: &Path, manifest: &str) -> Option<PathBuf> {
+    if !manifest.contains('*') {
+        let p = root.join(manifest);
+        return p.is_file().then_some(p);
+    }
+    let suffix = manifest.trim_start_matches('*');
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut hits: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(suffix))
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
+}
+
 /// Skips build artifacts, hidden directories, and binary files.
 fn build_project_tree(root: &Path, max_entries: usize) -> String {
-    let skip_dirs: &[&str] = &[
-        "target",
-        "node_modules",
-        ".git",
-        "dist",
-        "build",
-        "out",
-        ".cache",
-        "__pycache__",
-        ".venv",
-        "vendor",
-    ];
-    let source_exts: &[&str] = &[
-        "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "kt", "rb", "ex", "exs", "toml",
-        "yaml", "yml", "json", "md", "sh", "sql", "html", "css",
-    ];
+    // Both lists come from the shared registry, so a language added there is
+    // picked up here without a second edit.
+    let skip_dirs: &[&str] = crate::langs::SKIP_DIRS;
+    let source_exts: &[&str] = &crate::langs::source_exts();
 
     let mut entries: Vec<String> = Vec::new();
     collect_tree(

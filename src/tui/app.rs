@@ -728,22 +728,13 @@ pub fn scan_at_files(cwd: &std::path::Path, query: &str) -> Vec<AtEntry> {
 /// Collect source files inside a directory (recursive), capped at `max`.
 /// Skips target/, node_modules/, .git/, hidden files, and binary files.
 pub fn collect_dir_files(dir: &std::path::Path, max: usize) -> Vec<std::path::PathBuf> {
-    let source_exts = [
-        "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "kt", "rb", "toml", "yaml", "yml",
-        "json", "md", "sh", "sql", "html", "css", "txt", "env",
-    ];
-    let skip_dirs = [
-        "target",
-        "node_modules",
-        ".git",
-        "dist",
-        "build",
-        "out",
-        "__pycache__",
-    ];
+    // The picker offers a superset of what discovery scans: a user may want to
+    // @-mention a README, which would only be noise in the project tree.
+    let source_exts = crate::langs::referenceable_exts();
+    let skip_dirs = crate::langs::SKIP_DIRS;
 
     let mut out = Vec::new();
-    collect_dir_recursive(dir, &source_exts, &skip_dirs, &mut out, max);
+    collect_dir_recursive(dir, &source_exts, skip_dirs, &mut out, max);
     out
 }
 

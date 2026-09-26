@@ -27,6 +27,7 @@ An autonomous terminal coding agent. Chat with an AI that reads, writes, and sea
 - **Tools**: `read_file`, `write_file`, `patch_file`, `create_dir`, `glob`, `grep`, `list_symbols`, `git`, `shell_exec`, `run_command`, `run_tests`, `web_fetch`
 - **Spec-driven development** — `/spec` writes requirements, design, and an executable task list before code
 - **AST symbol index** — `list_symbols` parses Rust/Python/JS/TS/Go with tree-sitter instead of grepping
+- **One language registry** — `src/langs.rs` is the single answer for what vibectl recognises, so the symbol index, the discovery scan, the `@`-mention picker, and the change fingerprint cannot drift apart
 - **Path sandbox** — every file access is confined to the project root; `..` traversal and symlink escapes are refused
 - **Retry with backoff** — 429/5xx are retried with exponential backoff, honouring `Retry-After`; 4xx fails fast
 - **Shell approval** — all shell commands and file writes pause for `[y]/[n]` confirmation
@@ -352,6 +353,7 @@ src/
 │   ├── shell.rs      # shell_exec + run_command + run_tests
 │   └── web.rs        # web_fetch
 ├── workspace.rs      # project type detection + build/test command inference
+├── langs.rs          # the single language/skip-dir registry
 ├── agent/
 │   ├── mod.rs        # agent loop, tool dispatch, approval, run_id
 │   ├── intent.rs     # 7-way intent classification (rules + LLM fallback)

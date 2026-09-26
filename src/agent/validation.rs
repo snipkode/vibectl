@@ -384,14 +384,9 @@ pub fn is_project_ready(workspace: &WorkspaceContext) -> bool {
 /// Skips the usual noise directories and symlinks (a symlinked tree could pull
 /// in an unbounded amount of data, or loop).
 fn collect_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-    const SKIP: &[&str] = &[
-        "node_modules",
-        "target",
-        ".git",
-        "dist",
-        "build",
-        ".vibectl",
-    ];
+    // Shared with the discovery scan and the file picker. `.vibectl` is added
+    // separately: a spec being written must not count as source progress.
+    const SKIP: &[&str] = crate::langs::SKIP_DIRS;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -399,7 +394,7 @@ fn collect_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if SKIP.contains(&name.as_ref()) {
+        if SKIP.contains(&name.as_ref()) || name == ".vibectl" {
             continue;
         }
         // `symlink_metadata` does not follow the link.

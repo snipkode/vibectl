@@ -11,14 +11,18 @@ impl Tool for ListSymbols {
     fn def(&self) -> ToolDef {
         ToolDef::new(
             "list_symbols",
-            r#"List top-level symbols (functions, structs, classes, methods, constants, etc.)
-in a source file using AST parsing. Supported languages: Rust, Python, JavaScript,
-TypeScript, Go. Detected automatically from the file extension.
-
-Returns each symbol as:  <kind> <name>  (line <n>)
-
-Use this before editing a file to understand its structure without reading every line.
-The `kind` filter is optional — omit it to list all symbols."#,
+            // The supported-language sentence is generated from the registry.
+            // Hand-maintaining it meant the description could promise a language
+            // the dispatch below rejects.
+            &format!(
+                "List top-level symbols (functions, structs, classes, methods, constants, etc.)\n\
+                 in a source file using AST parsing. Supported languages: {}.\n\
+                 Detected automatically from the file extension.\n\n\
+                 Returns each symbol as:  <kind> <name>  (line <n>)\n\n\
+                 Use this before editing a file to understand its structure without reading every \
+                 line.\nThe `kind` filter is optional \u{2014} omit it to list all symbols.",
+                crate::langs::ast_lang_list()
+            ),
             json!({
                 "type": "object",
                 "properties": {
@@ -64,7 +68,8 @@ The `kind` filter is optional — omit it to list all symbols."#,
 
         let symbols = match ext.as_str() {
             "rs" => extract_symbols(&source, rust_language(), RUST_RULES, kind_filter.as_deref()),
-            "py" => extract_symbols(
+            // .pyi is a type-stub file; the Python grammar parses it fine.
+            "py" | "pyi" => extract_symbols(
                 &source,
                 python_language(),
                 PYTHON_RULES,
@@ -73,14 +78,18 @@ The `kind` filter is optional — omit it to list all symbols."#,
             "js" | "jsx" | "mjs" | "cjs" => {
                 extract_symbols(&source, js_language(), JS_RULES, kind_filter.as_deref())
             }
-            "ts" | "tsx" => {
+            // .mts/.cts are the ESM/CommonJS TypeScript variants.
+            "ts" | "tsx" | "mts" | "cts" => {
                 extract_symbols(&source, ts_language(), TS_RULES, kind_filter.as_deref())
             }
             "go" => extract_symbols(&source, go_language(), GO_RULES, kind_filter.as_deref()),
             other => {
+                // The supported list is generated from the registry, so it
+                // cannot advertise a language the match above does not handle.
                 bail!(
                     "list_symbols: unsupported file extension '.{other}'. \
-                     Supported: .rs .py .js .jsx .ts .tsx .go"
+                     Supported: {}",
+                    crate::langs::ast_ext_list()
                 )
             }
         }?;
@@ -561,5 +570,128 @@ func Add(a, b int) int { return a + b }
         let s = syms(src, rust_language(), RUST_RULES, Some("struct"));
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].kind, "struct");
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A syntactically valid, near-empty snippet per language. Only needs to
+    /// parse; the test cares about which grammar was selected, not the output.
+    fn sample(lang_name: &str) -> &'static str {
+        match lang_name {
+            "Rust" => "fn main() {}",
+            "Python" => "def main():\n    pass\n",
+            "JavaScript" => "function main() {}\n",
+            "TypeScript" => "function main(): void {}\n",
+            "Go" => "package main\n\nfunc main() {}\n",
+            other => panic!("no sample for {other}; add one when adding a grammar"),
+        }
+    }
+
+    /// Every extension the registry claims `ast: true` must actually be handled
+    /// by the dispatch above.
+    ///
+    /// This is the test that stops the two from drifting: the registry is a
+    /// table, the dispatch is a `match`, and they are written in different
+    /// places. Asserting on behaviour (does a real call get past the
+    /// "unsupported extension" guard?) rather than on a second hand-written
+    /// list means adding a grammar in one place and forgetting the other fails
+    /// here instead of silently in production.
+    #[test]
+    fn every_extension_the_registry_marks_as_ast_really_dispatches() {
+        let tool = ListSymbols;
+        let mut checked = 0;
+
+        for lang in crate::langs::LANGS {
+            if !lang.ast {
+                continue;
+            }
+            for ext in lang.exts {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let file = dir.path().join(format!("probe.{ext}"));
+                std::fs::write(&file, sample(lang.name)).expect("write probe");
+
+                let result = tool.run(&json!({ "path": file.to_str().unwrap() }), dir.path());
+                checked += 1;
+
+                if let Err(e) = result {
+                    let msg = e.to_string();
+                    assert!(
+                        !msg.contains("unsupported file extension"),
+                        "registry marks .{ext} as ast, but the dispatch rejects it: {msg}"
+                    );
+                }
+            }
+        }
+
+        assert!(
+            checked >= 5,
+            "expected the known grammars, checked {checked}"
+        );
+    }
+
+    /// The inverse: an extension nobody claims must be refused, and the error
+    /// must list what is actually supported.
+    #[test]
+    fn an_unclaimed_extension_is_refused_with_a_generated_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("probe.png");
+        std::fs::write(&file, "not source").expect("write probe");
+
+        let err = match ListSymbols.run(&json!({ "path": file.to_str().unwrap() }), dir.path()) {
+            Ok(_) => panic!("a PNG must not produce symbols"),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(
+            err.contains("unsupported file extension '.png'"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains(&crate::langs::ast_ext_list()),
+            "the supported list should come from the registry: {err}"
+        );
+    }
+
+    #[test]
+    fn a_real_rust_file_yields_its_symbols() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("lib.rs");
+        std::fs::write(
+            &file,
+            "pub struct Config;\n\npub fn load() -> Config { Config }\n\ntrait T {}\n",
+        )
+        .expect("write");
+
+        let out = ListSymbols
+            .run(&json!({ "path": file.to_str().unwrap() }), dir.path())
+            .expect("parse")
+            .content;
+
+        assert!(out.contains("Config"), "got: {out}");
+        assert!(out.contains("load"), "got: {out}");
+        assert!(out.contains("struct"), "got: {out}");
+    }
+
+    #[test]
+    fn the_kind_filter_narrows_the_result() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "pub struct OnlyAStruct;\n").expect("write");
+
+        let out = ListSymbols
+            .run(
+                &json!({ "path": file.to_str().unwrap(), "kind": "function" }),
+                dir.path(),
+            )
+            .expect("parse")
+            .content;
+        assert!(
+            !out.contains("OnlyAStruct"),
+            "a struct must not match kind=function: {out}"
+        );
     }
 }
