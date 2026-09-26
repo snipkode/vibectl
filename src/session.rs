@@ -25,27 +25,9 @@ impl Session {
         if settings.is_file() {
             let raw = std::fs::read_to_string(&settings)
                 .with_context(|| format!("failed to read {}", settings.display()))?;
-            let project_cfg: Config = serde_yaml::from_str(&raw)
+            let overlay = crate::config::ConfigOverlay::parse(&raw)
                 .with_context(|| format!("invalid config {}", settings.display()))?;
-            if !project_cfg.model.is_empty() {
-                cfg.model = project_cfg.model;
-            }
-            cfg.temperature = project_cfg.temperature;
-            cfg.max_tokens = project_cfg.max_tokens;
-            cfg.system_prompt = project_cfg.system_prompt.or(cfg.system_prompt);
-            cfg.allow_any_path = cfg.allow_any_path || project_cfg.allow_any_path;
-            cfg.providers.openai_api_key = project_cfg
-                .providers
-                .openai_api_key
-                .or(cfg.providers.openai_api_key);
-            cfg.providers.anthropic_api_key = project_cfg
-                .providers
-                .anthropic_api_key
-                .or(cfg.providers.anthropic_api_key);
-            cfg.providers.ollama_base_url = project_cfg
-                .providers
-                .ollama_base_url
-                .or(cfg.providers.ollama_base_url);
+            overlay.apply(&mut cfg);
         }
 
         let model = model_override.unwrap_or_else(|| cfg.model.clone());
