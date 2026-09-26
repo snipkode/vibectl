@@ -80,6 +80,8 @@ fn spinner_char(app: &App) -> char {
 
 fn cursor_visible(app: &App) -> bool {
     // blink off when busy, solid when idle
+    // `% 2 == 0` rather than is_multiple_of(): the latter needs 1.87, and
+    // Cargo.toml declares an MSRV of 1.85.
     !app.busy && (app.frame / BLINK_PERIOD) % 2 == 0
 }
 
@@ -393,13 +395,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         height: 1,
     };
 
-    // ── Border color: dim when idle/empty, bright when typing, muted when busy
-    let border_color = if app.busy {
-        C_INPUT_BORDER
-    } else if app.input.is_empty() {
-        C_INPUT_BORDER
-    } else {
+    // ── Border color: bright when the user is typing, dim when idle or busy
+    let border_color = if !app.busy && !app.input.is_empty() {
         C_INPUT_ACTIVE
+    } else {
+        C_INPUT_BORDER
     };
 
     // Draw the rounded box
@@ -514,11 +514,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         }
 
         // show "…" prefix if scrolled
-        if win_start > 0 {
-            if let Some(first) = spans.get_mut(1) {
-                let content = format!("…{}", first.content);
-                first.content = content.into();
-            }
+        if win_start > 0
+            && let Some(first) = spans.get_mut(1)
+        {
+            let content = format!("…{}", first.content);
+            first.content = content.into();
         }
     }
 
@@ -872,7 +872,7 @@ fn render_approval_modal(frame: &mut Frame, app: &App) {
     };
 
     let area = frame.area();
-    let modal_w = (area.width.min(78)).max(44);
+    let modal_w = area.width.clamp(44, 78);
     let modal_h: u16 = 7;
     let modal = Rect {
         x: area.width.saturating_sub(modal_w) / 2,
@@ -1253,40 +1253,45 @@ fn parse_inline(src: &str, base: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut rest = src;
     while !rest.is_empty() {
-        if rest.starts_with('`') {
-            if let Some(i) = rest[1..].find('`') {
-                let end = i + 1;
-                spans.push(Span::styled(
-                    rest[1..end].to_string(),
-                    Style::default().fg(C_CODE_TEXT),
-                ));
-                rest = &rest[end + 1..];
-                continue;
-            }
+        // Each marker needs a *non-empty* body: an empty span would consume the
+        // marker without emitting text, so "**" on its own rendered as nothing.
+        if rest.starts_with('`')
+            && let Some(i) = rest[1..].find('`')
+            && i > 0
+        {
+            let end = i + 1;
+            spans.push(Span::styled(
+                rest[1..end].to_string(),
+                Style::default().fg(C_CODE_TEXT),
+            ));
+            rest = &rest[end + 1..];
+            continue;
         }
-        if rest.starts_with("**") {
-            if let Some(i) = rest[2..].find("**") {
-                let end = i + 2;
-                spans.push(Span::styled(
-                    rest[2..end].to_string(),
-                    base.add_modifier(Modifier::BOLD),
-                ));
-                rest = &rest[end + 2..];
-                continue;
-            }
+        if rest.starts_with("**")
+            && let Some(i) = rest[2..].find("**")
+            && i > 0
+        {
+            let end = i + 2;
+            spans.push(Span::styled(
+                rest[2..end].to_string(),
+                base.add_modifier(Modifier::BOLD),
+            ));
+            rest = &rest[end + 2..];
+            continue;
         }
-        if rest.starts_with('*') {
-            if let Some(i) = rest[1..].find('*') {
-                let end = i + 1;
-                spans.push(Span::styled(
-                    rest[1..end].to_string(),
-                    base.add_modifier(Modifier::ITALIC),
-                ));
-                rest = &rest[end + 1..];
-                continue;
-            }
+        if rest.starts_with('*')
+            && let Some(i) = rest[1..].find('*')
+            && i > 0
+        {
+            let end = i + 1;
+            spans.push(Span::styled(
+                rest[1..end].to_string(),
+                base.add_modifier(Modifier::ITALIC),
+            ));
+            rest = &rest[end + 1..];
+            continue;
         }
-        let next = rest.find(|c| c == '`' || c == '*').unwrap_or(rest.len());
+        let next = rest.find(['`', '*']).unwrap_or(rest.len());
         if next == 0 {
             spans.push(Span::styled(rest[..1].to_string(), base));
             rest = &rest[1..];
@@ -1315,6 +1320,8 @@ fn wrap_rows(rows: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
 }
 
 fn wrap_line(line: Line<'static>, width: usize, out: &mut Vec<Line<'static>>) {
+    // A zero budget would emit one row per character; clamp to a usable width.
+    let width = width.max(1);
     let mut current: Vec<Span<'static>> = Vec::new();
     let mut col = 0usize;
 
@@ -1352,12 +1359,18 @@ fn tool_icon(name: &str) -> &'static str {
         "◎"
     } else if name.contains("write") {
         "✎"
+    } else if name.contains("patch") {
+        "◫"
     } else if name.contains("glob") || name.contains("find") {
         "◈"
     } else if name.contains("grep") || name.contains("search") {
         "⌕"
+    } else if name.contains("symbol") {
+        "ƒ"
     } else if name.contains("git") {
         "⎇"
+    } else if name.contains("web") || name.contains("fetch") {
+        "⇱"
     } else if name.contains("shell") || name.contains("exec") {
         "$"
     } else {
@@ -1396,4 +1409,273 @@ fn compact_tool_output(text: &str) -> Vec<String> {
         out.push(format!("  ⋯ +{} lines", total - MAX_LINES));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Style;
+
+    fn plain() -> Style {
+        Style::default()
+    }
+
+    fn row_text(line: &Line<'static>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn rendered(md: &str) -> Vec<String> {
+        markdown_to_lines(md, plain())
+            .iter()
+            .map(row_text)
+            .collect()
+    }
+
+    // ── tool_icon ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_icon_matches_on_substring() {
+        assert_eq!(tool_icon("read_file"), "◎");
+        assert_eq!(tool_icon("write_file"), "✎");
+        assert_eq!(tool_icon("patch_file"), "◫");
+        assert_eq!(tool_icon("list_symbols"), "ƒ");
+        assert_eq!(tool_icon("web_fetch"), "⇱");
+        assert_eq!(tool_icon("glob"), "◈");
+        assert_eq!(tool_icon("grep"), "⌕");
+        assert_eq!(tool_icon("git"), "⎇");
+        assert_eq!(tool_icon("shell_exec"), "$");
+    }
+
+    #[test]
+    fn tool_icon_falls_back_for_unknown_tools() {
+        assert_eq!(tool_icon("list_symbols"), "ƒ");
+        assert_eq!(tool_icon("some_future_tool"), "○");
+        assert_eq!(tool_icon(""), "○");
+    }
+
+    // ── compact_tool_output ───────────────────────────────────────────────────
+
+    #[test]
+    fn compact_tool_output_truncates_line_count() {
+        let text = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = compact_tool_output(&text);
+        assert_eq!(out.len(), 5, "4 lines plus the overflow marker");
+        assert_eq!(out[4], "  ⋯ +6 lines");
+    }
+
+    #[test]
+    fn compact_tool_output_truncates_long_lines() {
+        let long = "x".repeat(500);
+        let out = compact_tool_output(&long);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].ends_with('…'));
+        assert_eq!(out[0].chars().count(), 111, "110 chars plus the ellipsis");
+    }
+
+    #[test]
+    fn compact_tool_output_drops_blank_lines() {
+        assert_eq!(compact_tool_output("  \n\n a \n\n"), vec!["a".to_string()]);
+        assert!(compact_tool_output("   \n\n").is_empty());
+    }
+
+    // ── short_cwd ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn short_cwd_leaves_short_paths_alone() {
+        assert_eq!(short_cwd("/a/b", 40), "/a/b");
+    }
+
+    #[test]
+    fn short_cwd_truncates_from_the_left() {
+        let long = "/home/user/projects/some/deeply/nested/repo";
+        let out = short_cwd(long, 12);
+        assert_eq!(out.chars().count(), 12);
+        assert!(out.starts_with('…'), "got {out:?}");
+    }
+
+    #[test]
+    fn short_cwd_never_panics_on_a_tiny_budget() {
+        assert_eq!(short_cwd("/some/path", 0), "…");
+    }
+
+    // ── markdown ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn markdown_headings_lose_their_hashes() {
+        assert_eq!(rendered("# Title"), vec!["Title"]);
+        assert_eq!(rendered("## Sub"), vec!["Sub"]);
+        assert_eq!(rendered("### Deep"), vec!["Deep"]);
+    }
+
+    #[test]
+    fn markdown_code_fences_become_a_boxed_block() {
+        let rows = rendered("before\n```rust\nfn main() {}\n```\nafter");
+        assert_eq!(rows[0], "before");
+        assert_eq!(rows[1], "╔═ rust ═", "language label in the top border");
+        assert!(rows[2].contains("fn main() {}"), "got {:?}", rows[2]);
+        assert!(rows[2].starts_with('║'), "code is inset behind a gutter");
+        assert_eq!(rows[3], "╚══════");
+        assert_eq!(rows[5], "after", "content after the fence survives");
+    }
+
+    #[test]
+    fn markdown_code_block_preserves_internal_blank_lines() {
+        let rows = rendered("```\na\n\nb\n```");
+        assert_eq!(rows[0], "╔═ code ═", "no language means an unlabelled box");
+        assert_eq!(rows[1], "║ a");
+        assert_eq!(rows[2], "║ ", "the interior blank line is kept");
+        assert_eq!(rows[3], "║ b");
+        assert_eq!(rows[4], "╚══════");
+    }
+
+    #[test]
+    fn unterminated_code_fence_does_not_hang_or_panic() {
+        // A truncated assistant message must still render.
+        let rows = rendered("```rust\nfn main() {}");
+        assert!(!rows.is_empty());
+        assert!(rows[0].starts_with('╔'), "opens a box: {:?}", rows[0]);
+        assert!(rows[1].contains("fn main()"), "got {:?}", rows[1]);
+    }
+
+    #[test]
+    fn markdown_lists_get_a_bullet() {
+        let rows = rendered("- one\n* two");
+        assert_eq!(rows[0], "• one");
+        assert_eq!(rows[1], "• two");
+    }
+
+    #[test]
+    fn markdown_horizontal_rule_is_replaced() {
+        let rows = rendered("---");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].starts_with('─'));
+    }
+
+    #[test]
+    fn markdown_blockquote_gets_a_marker() {
+        let rows = rendered("> quoted");
+        assert!(rows[0].starts_with("▍ "), "got {:?}", rows[0]);
+        assert!(rows[0].contains("quoted"));
+    }
+
+    // ── parse_inline ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_inline_extracts_code_bold_and_italic() {
+        let spans = parse_inline("a `code` b **bold** c *it*", plain());
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "a code b bold c it");
+        assert_eq!(spans.len(), 6, "got {spans:?}");
+    }
+
+    #[test]
+    fn parse_inline_does_not_panic_on_unmatched_markers() {
+        for src in ["`unclosed", "**unclosed", "*unclosed", "`", "**", "*"] {
+            let spans = parse_inline(src, plain());
+            let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(!text.is_empty(), "input {src:?} produced no text");
+        }
+    }
+
+    #[test]
+    fn parse_inline_is_lossless_for_plain_text() {
+        let src = "just some plain words";
+        let spans = parse_inline(src, plain());
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, src);
+    }
+
+    // ── wrap ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wrap_rows_never_exceeds_the_width() {
+        let long = "word ".repeat(200);
+        let rows = wrap_rows(markdown_to_lines(&long, plain()), 20);
+        assert!(rows.len() > 1, "long input should wrap");
+        for row in &rows {
+            assert!(row_text(row).chars().count() <= 20, "overflowed: {row:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_rows_preserves_every_word() {
+        let src = "alpha beta gamma delta epsilon";
+        let rows = wrap_rows(markdown_to_lines(src, plain()), 12);
+        let joined: String = rows.iter().map(row_text).collect();
+        for word in src.split(' ') {
+            assert!(joined.contains(word), "lost {word:?} in {joined:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_rows_emits_a_blank_row_for_empty_input() {
+        let rows = wrap_rows(vec![Line::default()], 10);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].spans.is_empty());
+    }
+
+    #[test]
+    fn wrap_rows_clamps_a_zero_width_budget() {
+        // A zero budget must not degenerate into one row per character.
+        let rows = wrap_rows(markdown_to_lines("some text here", plain()), 0);
+        assert!(rows.len() <= 15, "got {} rows", rows.len());
+    }
+
+    // ── Layout ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn main_areas_reserves_header_and_input_rows() {
+        let area = Rect::new(0, 0, 80, 24);
+        let [header, body, input] = main_areas(area, true);
+        assert_eq!(header.height, 2);
+        assert_eq!(input.height, 4);
+        assert_eq!(body.height, 24 - 2 - 4);
+        assert_eq!(body.y, 2);
+    }
+
+    #[test]
+    fn main_areas_gives_the_input_no_rows_when_hidden() {
+        let area = Rect::new(0, 0, 80, 24);
+        let [header, body, input] = main_areas(area, false);
+        assert_eq!(input.height, 0);
+        assert_eq!(body.height, 22);
+        assert_eq!(header.height, 2);
+    }
+
+    #[test]
+    fn h_inset_never_inverts_the_width() {
+        let r = Rect::new(0, 0, 10, 5);
+        let inset = h_inset(r, 100);
+        assert_eq!(inset.width, 0, "over-wide padding must not wrap around");
+        assert_eq!(inset.x, 5);
+    }
+
+    #[test]
+    fn h_inset_is_symmetric() {
+        let r = Rect::new(4, 2, 20, 3);
+        let inset = h_inset(r, 3);
+        assert_eq!(inset.x, r.x + 3);
+        assert_eq!(inset.width, r.width - 6);
+        assert_eq!(inset.y, r.y);
+        assert_eq!(inset.height, r.height);
+    }
+
+    // ── Approvals ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_icons_cover_every_registered_tool() {
+        // A tool with no icon silently renders as a generic dot; assert the
+        // registry and the icon table stay in sync.
+        for tool in crate::tools::all_tools() {
+            let name = tool.def().name;
+            assert_ne!(
+                tool_icon(&name),
+                "○",
+                "{name} is registered but has no icon mapping"
+            );
+        }
+    }
 }

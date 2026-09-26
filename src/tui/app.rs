@@ -267,14 +267,9 @@ impl App {
             return false;
         }
         let idx = self.suggestions[self.suggestion_sel];
-        let (cmd, _, usage) = COMMANDS[idx];
-        // If usage has args (space after cmd), complete with usage; else just cmd + space
-        let completed = if usage.contains(' ') {
-            format!("{} ", cmd)
-        } else {
-            format!("{} ", cmd)
-        };
-        self.input = completed;
+        let (cmd, _, _usage) = COMMANDS[idx];
+        // Always land on "<cmd> " and let the user keep typing the arguments.
+        self.input = format!("{cmd} ");
         self.cursor = self.input.chars().count();
         self.suggestion_visible = false;
         self.suggestions.clear();
@@ -408,7 +403,9 @@ impl App {
                             .unwrap_or_else(|_| f.display().to_string());
                         result.push_str(&format!("#### {flabel}\n```\n"));
                         result.push_str(&contents);
-                        if !contents.ends_with('\n') { result.push('\n'); }
+                        if !contents.ends_with('\n') {
+                            result.push('\n');
+                        }
                         result.push_str("```\n");
                     }
                 }
@@ -489,9 +486,11 @@ impl App {
         if self.history.is_empty() {
             return;
         }
+        // Clamp at the oldest entry rather than wrapping — history_next clears
+        // past the newest, so wrapping here would make recall asymmetric.
         let pos = match self.history_pos {
-            Some(p) if p > 0 => p - 1,
-            _ => self.history.len().saturating_sub(1),
+            Some(p) => p.saturating_sub(1),
+            None => self.history.len().saturating_sub(1),
         };
         self.history_pos = Some(pos);
         self.input = self.history[pos].clone();
@@ -562,11 +561,11 @@ impl App {
     }
 
     pub fn stream_text(&mut self, delta: &str) {
-        if let Some(i) = self.active_assistant {
-            if i < self.messages.len() {
-                self.messages[i].text.push_str(delta);
-                return;
-            }
+        if let Some(i) = self.active_assistant
+            && i < self.messages.len()
+        {
+            self.messages[i].text.push_str(delta);
+            return;
         }
         self.messages
             .push(MessageItem::assistant(delta.to_string()));
@@ -682,11 +681,18 @@ pub fn scan_at_files(cwd: &std::path::Path, query: &str) -> Vec<AtEntry> {
 /// Skips target/, node_modules/, .git/, hidden files, and binary files.
 pub fn collect_dir_files(dir: &std::path::Path, max: usize) -> Vec<std::path::PathBuf> {
     let source_exts = [
-        "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "kt",
-        "rb", "toml", "yaml", "yml", "json", "md", "sh", "sql",
-        "html", "css", "txt", "env",
+        "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "kt", "rb", "toml", "yaml", "yml",
+        "json", "md", "sh", "sql", "html", "css", "txt", "env",
     ];
-    let skip_dirs = ["target", "node_modules", ".git", "dist", "build", "out", "__pycache__"];
+    let skip_dirs = [
+        "target",
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "out",
+        "__pycache__",
+    ];
 
     let mut out = Vec::new();
     collect_dir_recursive(dir, &source_exts, &skip_dirs, &mut out, max);
@@ -713,9 +719,13 @@ fn collect_dir_recursive(
             return;
         }
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with('.') { continue; }
+        if name.starts_with('.') {
+            continue;
+        }
         if p.is_dir() {
-            if skip_dirs.contains(&name) { continue; }
+            if skip_dirs.contains(&name) {
+                continue;
+            }
             collect_dir_recursive(&p, source_exts, skip_dirs, out, max);
         } else if p.is_file() {
             let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -727,7 +737,6 @@ fn collect_dir_recursive(
 }
 
 /// ─── Char/byte index helpers ──────────────────────────────────────────────────
-
 fn char_count(s: &str) -> usize {
     s.chars().count()
 }
@@ -737,4 +746,334 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// A throwaway app backed by a temp project dir.  The default model routes
+    /// to the Ollama provider, which constructs without any network access.
+    fn app() -> (App, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session =
+            Session::new(Config::default(), dir.path().to_path_buf(), None).expect("session");
+        (App::new(session), dir)
+    }
+
+    // ── Char/byte index helpers ───────────────────────────────────────────────
+
+    #[test]
+    fn char_helpers_count_chars_not_bytes() {
+        assert_eq!(char_count("abc"), 3);
+        assert_eq!(char_count("héllo"), 5);
+        assert_eq!(char_count("日本語"), 3);
+        assert_eq!(char_count(""), 0);
+    }
+
+    #[test]
+    fn char_to_byte_maps_char_index_to_byte_offset() {
+        let s = "héllo";
+        assert_eq!(char_to_byte(s, 0), 0);
+        assert_eq!(char_to_byte(s, 1), 1, "é is two bytes");
+        assert_eq!(char_to_byte(s, 2), 3);
+        assert_eq!(char_to_byte(s, 99), s.len(), "out of range clamps to len");
+    }
+
+    // ── Cursor editing ────────────────────────────────────────────────────────
+
+    #[test]
+    fn insert_and_backspace_handle_multibyte() {
+        let (mut a, _d) = app();
+        for c in "日本語".chars() {
+            a.insert_char(c);
+        }
+        assert_eq!(a.input, "日本語");
+        assert_eq!(a.cursor, 3, "cursor counts chars, not bytes");
+
+        a.backspace();
+        assert_eq!(a.input, "日本");
+        assert_eq!(a.cursor, 2);
+    }
+
+    #[test]
+    fn backspace_at_start_is_a_noop() {
+        let (mut a, _d) = app();
+        a.backspace();
+        assert!(a.input.is_empty());
+        assert_eq!(a.cursor, 0);
+    }
+
+    #[test]
+    fn insert_at_cursor_position_lands_in_the_right_place() {
+        let (mut a, _d) = app();
+        for c in "ac".chars() {
+            a.insert_char(c);
+        }
+        a.move_left(); // cursor between 'a' and 'c'
+        a.insert_char('b');
+        assert_eq!(a.input, "abc");
+        assert_eq!(a.cursor, 2);
+    }
+
+    #[test]
+    fn delete_at_cursor_removes_forward() {
+        let (mut a, _d) = app();
+        for c in "abc".chars() {
+            a.insert_char(c);
+        }
+        a.move_home();
+        a.delete_at_cursor();
+        assert_eq!(a.input, "bc");
+        assert_eq!(a.cursor, 0, "deleting forward must not move the cursor");
+    }
+
+    #[test]
+    fn cursor_movement_clamps_at_both_ends() {
+        let (mut a, _d) = app();
+        a.move_left();
+        assert_eq!(a.cursor, 0);
+        a.move_right();
+        assert_eq!(a.cursor, 0, "cannot move past an empty input");
+
+        for c in "hi".chars() {
+            a.insert_char(c);
+        }
+        a.move_right();
+        assert_eq!(a.cursor, 2, "cannot move past the end");
+        a.move_end();
+        assert_eq!(a.cursor, 2);
+        a.move_home();
+        assert_eq!(a.cursor, 0);
+    }
+
+    // ── History ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn history_walks_back_then_forward() {
+        let (mut a, _d) = app();
+        a.submit();
+        a.input = "first".into();
+        a.submit();
+        a.input = "second".into();
+        a.submit();
+        assert!(a.input.is_empty(), "submit clears the input");
+
+        a.history_prev();
+        assert_eq!(a.input, "second");
+        a.history_prev();
+        assert_eq!(a.input, "first");
+        a.history_prev();
+        assert_eq!(a.input, "first", "clamps at the oldest entry");
+
+        a.history_next();
+        assert_eq!(a.input, "second");
+        a.history_next();
+        assert_eq!(a.input, "", "past the newest entry clears the input");
+        assert_eq!(a.history_pos, None);
+    }
+
+    #[test]
+    fn submit_ignores_whitespace_only_input() {
+        let (mut a, _d) = app();
+        a.input = "   ".into();
+        let out = a.submit();
+        assert_eq!(out, "   ");
+        assert!(a.history.is_empty(), "whitespace is not worth recalling");
+    }
+
+    #[test]
+    fn history_is_capped() {
+        let (mut a, _d) = app();
+        for i in 0..250 {
+            a.input = format!("msg{i}");
+            a.submit();
+        }
+        assert_eq!(a.history.len(), 200);
+        assert_eq!(a.history.last().unwrap(), "msg249");
+    }
+
+    // ── @ mention scanning ────────────────────────────────────────────────────
+
+    #[test]
+    fn scan_at_files_filters_by_prefix_and_sorts_dirs_first() {
+        let (_a, dir) = app();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::create_dir(dir.path().join("assets")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+
+        let hits = scan_at_files(dir.path(), "s");
+        let labels: Vec<&str> = hits.iter().map(|h| h.label.as_str()).collect();
+        assert_eq!(labels, vec!["src"], "only prefix matches, dirs first");
+
+        let all = scan_at_files(dir.path(), "");
+        assert_eq!(all.len(), 3, "empty query matches everything visible");
+    }
+
+    #[test]
+    fn scan_at_files_skips_hidden_and_target() {
+        let (_a, dir) = app();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "").unwrap();
+
+        let labels: Vec<String> = scan_at_files(dir.path(), "")
+            .into_iter()
+            .map(|h| h.label)
+            .collect();
+        assert_eq!(labels, vec!["visible.txt"]);
+    }
+
+    #[test]
+    fn scan_at_files_supports_relative_subpaths() {
+        let (_a, dir) = app();
+        std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+        std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+        std::fs::write(dir.path().join("src/other.rs"), "").unwrap();
+
+        let labels: Vec<String> = scan_at_files(dir.path(), "src/ag")
+            .into_iter()
+            .map(|h| h.label)
+            .collect();
+        assert_eq!(labels, vec!["src/agent"], "prefix-matches the directory");
+    }
+
+    #[test]
+    fn scan_at_files_with_trailing_slash_lists_that_directory() {
+        // Picking the directory is what triggers expansion in complete_at, so
+        // the dropdown offering the directory itself is the intended behaviour.
+        let (_a, dir) = app();
+        std::fs::create_dir_all(dir.path().join("src/agent")).unwrap();
+        std::fs::write(dir.path().join("src/agent/mod.rs"), "").unwrap();
+
+        let labels: Vec<String> = scan_at_files(dir.path(), "src/agent/")
+            .into_iter()
+            .map(|h| h.label)
+            .collect();
+        assert_eq!(labels, vec!["src/agent"]);
+    }
+
+    #[test]
+    fn scan_at_files_is_empty_for_a_missing_directory() {
+        let (_a, dir) = app();
+        assert!(scan_at_files(dir.path(), "nope/").is_empty());
+    }
+
+    // ── collect_dir_files ─────────────────────────────────────────────────────
+
+    #[test]
+    fn collect_dir_files_filters_extensions_and_skips_build_dirs() {
+        let (_a, dir) = app();
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("target/debug/big.rs"), "").unwrap();
+        std::fs::write(dir.path().join("node_modules/pkg/index.js"), "").unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+        std::fs::write(dir.path().join("src/logo.png"), "").unwrap();
+
+        let files: Vec<String> = collect_dir_files(dir.path(), 100)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files, vec!["lib.rs"], "binary ext + build dirs excluded");
+    }
+
+    #[test]
+    fn collect_dir_files_respects_the_cap() {
+        let (_a, dir) = app();
+        for i in 0..10 {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), "").unwrap();
+        }
+        assert_eq!(collect_dir_files(dir.path(), 4).len(), 4);
+    }
+
+    // ── Run lifecycle ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn interrupt_marks_idle_and_records_the_event() {
+        let (mut a, _d) = app();
+        a.busy = true;
+        let before = a.messages.len();
+        a.interrupt();
+        assert!(!a.busy);
+        assert_eq!(a.scroll_offset, 0);
+        assert!(a.messages.len() > before);
+    }
+
+    #[test]
+    fn scroll_never_goes_negative() {
+        let (mut a, _d) = app();
+        a.scroll_down(5);
+        assert_eq!(a.scroll_offset, 0, "saturating_sub keeps this at zero");
+        a.scroll_up(3);
+        assert_eq!(a.scroll_offset, 3);
+        a.follow_bottom();
+        assert_eq!(a.scroll_offset, 0);
+    }
+
+    // ── Misc ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn now_hhmm_is_a_valid_clock_time() {
+        let stamp = now_hhmm();
+        assert_eq!(stamp.len(), 5, "expected HH:MM, got {stamp:?}");
+        let (h, m) = stamp.split_once(':').expect("HH:MM shape");
+        assert_eq!(h.len(), 2, "hour must be zero-padded: {stamp:?}");
+        assert_eq!(m.len(), 2, "minute must be zero-padded: {stamp:?}");
+        let hour: u32 = h.parse().expect("hour");
+        let minute: u32 = m.parse().expect("minute");
+        assert!(hour < 24, "hour out of range: {stamp}");
+        assert!(minute < 60, "minute out of range: {stamp}");
+    }
+
+    #[test]
+    fn command_table_has_unique_names_and_matching_usage() {
+        let mut names: Vec<&str> = COMMANDS.iter().map(|(n, _, _)| *n).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "duplicate slash command in COMMANDS");
+
+        for (name, desc, usage) in COMMANDS {
+            assert!(name.starts_with('/'), "{name} should start with /");
+            assert!(!desc.is_empty(), "{name} has no description");
+            assert!(
+                usage.starts_with(name),
+                "{name} usage hint {usage:?} should start with the command"
+            );
+        }
+    }
+
+    #[test]
+    fn suggestions_filter_by_typed_prefix() {
+        let (mut a, _d) = app();
+        a.input = "/mo".into();
+        a.update_suggestions();
+        assert!(a.suggestion_visible);
+        let picked: Vec<&str> = a.suggestions.iter().map(|&i| COMMANDS[i].0).collect();
+        assert!(picked.contains(&"/model"), "got {picked:?}");
+        assert!(!picked.contains(&"/help"));
+    }
+
+    #[test]
+    fn suggestions_hidden_for_non_command_input() {
+        let (mut a, _d) = app();
+        a.input = "hello".into();
+        a.update_suggestions();
+        assert!(!a.suggestion_visible);
+        assert!(a.suggestions.is_empty());
+    }
+
+    #[test]
+    fn complete_suggestion_fills_in_the_command() {
+        let (mut a, _d) = app();
+        a.input = "/prov".into();
+        a.update_suggestions();
+        assert!(a.complete_suggestion());
+        assert!(a.input.starts_with("/provider"));
+        assert!(!a.suggestion_visible, "dropdown closes after completion");
+    }
 }
