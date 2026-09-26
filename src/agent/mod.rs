@@ -707,8 +707,12 @@ impl Agent {
             if user_intent == intent::Intent::Conversational && !clean_calls.is_empty() {
                 self.push(Message::assistant(text.clone())).await;
                 // Flush buffered text — no tool calls on this path.
-                for chunk in text_chunks {
-                    let _ = tx.send(AgentEvent::Text(chunk)).await;
+                if text_chunks.iter().any(|c| !c.trim().is_empty()) {
+                    for chunk in text_chunks {
+                        let _ = tx.send(AgentEvent::Text(chunk)).await;
+                    }
+                } else if text.trim().is_empty() {
+                    let _ = tx.send(AgentEvent::Text("✓ Done.\n".to_string())).await;
                 }
                 let _ = tx.send(AgentEvent::Done { finish_reason }).await;
                 break;
@@ -848,12 +852,19 @@ impl Agent {
                 continue;
             }
 
-            self.push(Message::assistant(text)).await;
+            self.push(Message::assistant(text.clone())).await;
             // Flush buffered text chunks to the UI — we now know the model
             // produced a plain text reply (no tool calls), so it is safe to
             // show the text without risk of rendering raw tool-call JSON.
-            for chunk in text_chunks {
-                let _ = tx.send(AgentEvent::Text(chunk)).await;
+            if text_chunks.iter().any(|c| !c.trim().is_empty()) {
+                for chunk in text_chunks {
+                    let _ = tx.send(AgentEvent::Text(chunk)).await;
+                }
+            } else if text.trim().is_empty() {
+                // Model returned an empty response (common with small local models
+                // after completing tool execution). Emit a minimal done indicator
+                // so the agent bubble is never left blank.
+                let _ = tx.send(AgentEvent::Text("✓ Done.\n".to_string())).await;
             }
             let _ = tx.send(AgentEvent::Done { finish_reason }).await;
             break;
